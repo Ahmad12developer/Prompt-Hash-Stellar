@@ -78,7 +78,6 @@ interface FormData {
   fullPrompt: string;
   priceXlm: string;
   tags: string[];
-  coCreators: RevenueSplitFormInput[];
 }
 
 interface CreatePromptFormProps {
@@ -120,7 +119,6 @@ export function CreatePromptForm({ onCreated }: CreatePromptFormProps) {
       description: "",
       fullPrompt: "",
       priceXlm: "2",
-      coCreators: [],
     },
     mode: "onChange",
   });
@@ -165,7 +163,6 @@ export function CreatePromptForm({ onCreated }: CreatePromptFormProps) {
           imageUrl: watchAllFields.imageUrl || "",
           category: watchAllFields.category || "",
           previewText: watchAllFields.previewText || "",
-          coCreators: watchAllFields.coCreators || [],
         },
         { offChainStorage },
       ),
@@ -347,7 +344,6 @@ export function CreatePromptForm({ onCreated }: CreatePromptFormProps) {
       // Encrypt the prompt content
       const encryptionResult = await encryptAndWrapPromptPayload(
         data.fullPrompt,
-        unlockPublicKey,
       );
 
       // Build the contract creation payload
@@ -370,15 +366,21 @@ export function CreatePromptForm({ onCreated }: CreatePromptFormProps) {
       };
 
       // Call the contract
+      const signer: any = {
+        signTransaction: async (xdr: string, opts: any) => ({
+          signedTxXdr: await signTransaction(xdr, opts),
+        }),
+      };
+
       const result = await PromptHashClient.createPrompt(
         browserStellarConfig,
-        { signTransaction },
+        signer,
         address,
         createInput,
       );
 
       if (result.success) {
-        if (sourcePromptId) {
+        if (sourcePromptId && result.promptId !== undefined) {
           saveRemixAttribution(result.promptId, sourcePromptId);
         }
         setSuccessMessage(`Prompt created! Transaction: ${result.txHash}`);

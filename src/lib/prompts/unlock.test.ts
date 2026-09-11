@@ -186,7 +186,7 @@ describe("unlockPromptContent client", () => {
         "7",
         vi.fn().mockResolvedValue({ signedMessage: "signed-by-wallet" }),
       ),
-    ).rejects.toMatchObject<Partial<UnlockError>>({
+    ).rejects.toMatchObject({
       name: "UnlockError",
       code: "ACCESS_NOT_PURCHASED",
       category: "access",
@@ -216,7 +216,7 @@ describe("unlockPromptContent client", () => {
         "7",
         vi.fn().mockResolvedValue({ signedMessage: "signed-by-wallet" }),
       ),
-    ).rejects.toMatchObject<Partial<UnlockError>>({
+    ).rejects.toMatchObject({
       code: "TEMPORARY_FAILURE",
       category: "server",
       retryable: true,
@@ -238,7 +238,7 @@ describe("unlockPromptContent client", () => {
         "7",
         vi.fn().mockResolvedValue({ signedMessage: "signed-by-wallet" }),
       ),
-    ).rejects.toMatchObject<Partial<UnlockError>>({
+    ).rejects.toMatchObject({
       code: "NETWORK_ERROR",
       category: "server",
       retryable: true,
