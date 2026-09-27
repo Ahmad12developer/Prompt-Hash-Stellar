@@ -22,8 +22,11 @@
     "seed:preview": "node scripts/seedPreview.mjs",
     "db:migrate": "ts-node src/db/migrateCli.ts up",
     "db:rollback": "ts-node src/db/rollbackCli.ts",
-    "retention:enqueue": "ts-node scripts/enqueueRetentionCleanup.ts"
+    "retention:enqueue": "ts-node scripts/enqueueRetentionCleanup.ts",
+    "health:report": "ts-node scripts/maintainerHealthReport.ts",
+    "validate:invariants": "ts-node scripts/validateRestoreInvariants.ts"
   },
+
   "files": [
     "build"
   ],

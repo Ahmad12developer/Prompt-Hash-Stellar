@@ -15,6 +15,13 @@ import { auditRouter } from "./routes/auditRoutes";
 import { libraryRouter } from "./routes/libraryRoutes";
 import { provenanceRouter } from "./routes/provenanceRoutes";
 import { walletSessionRouter } from "./routes/walletSessionRoutes";
+import { marketplaceRouter } from "./routes/marketplaceRoutes";
+import { featureFlagRouter } from "./routes/featureFlagRoutes";
+import { supportCaseRouter } from "./routes/supportCaseRoutes";
+import { qualityCheckRouter } from "./routes/qualityCheckRoutes";
+import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes";
+import { operationalHealthRouter } from "./routes/operationalHealthRoutes";
+import { drRouter } from "./routes/drRoutes";
 import {
   GetOpenApiSchema,
   GetOpenApiExplorer,
@@ -22,7 +29,6 @@ import {
 import { runBackup, getBackupHealth } from "./services/backupService";
 import { IndexerState } from "./models/IndexerState";
 import { startIndexer } from "./services/indexer";
-import { getBackupHealth } from "./services/backupService";
 
 const app = express();
 
@@ -30,29 +36,33 @@ const port = 5000;
 
 // Sentry error handler should be registered after routes (#332).
 app.use(express.json());
-app.use(correlationMiddleware);
 
 app.use("/api/improve-proxy", proxyrouter);
-app.use("/api/prompts", publishLimiter, promptRouter);
+app.use("/api/prompts", promptRouter);
 app.use("/api/user", userRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/webhooks", webhookRouter);
 app.use("/api/versions", versioningRouter);
-app.use("/api/governance", authLimiter, governanceRouter); // Issue #113
+app.use("/api/governance", governanceRouter); // Issue #113
 app.use("/api/search", searchRouter);
-app.use("/api/fulfillment", strictLimiter, fulfillmentRouter);
+app.use("/api/fulfillment", fulfillmentRouter);
 app.use("/api/reviews", reviewRouter);
-app.use("/api/notifications", authLimiter, notificationRouter);
-app.use("/api/audit", authLimiter, auditRouter); // #783
-app.use("/api/wallet-session", authLimiter, walletSessionRouter); // #753, #784
+app.use("/api/notifications", notificationRouter);
+app.use("/api/audit", auditRouter); // #783
+app.use("/api/wallet-session", walletSessionRouter); // #753, #784
 app.use("/api/library", libraryRouter); // #784
 app.use("/api/provenance", provenanceRouter); // #753
+app.use("/api/marketplace", marketplaceRouter);
+app.use("/api/flags", featureFlagRouter);
+app.use("/api/support-cases", supportCaseRouter);
+app.use("/api/quality-checks", qualityCheckRouter);
+app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
+app.use("/api/admin/operational-health", operationalHealthRouter);
+app.use("/api/admin/dr", drRouter);
 
 // Machine-readable API schema + interactive explorer (#713).
 app.get("/api/openapi.json", GetOpenApiSchema);
 app.get("/api/docs", GetOpenApiExplorer);
-
-app.post("/api/test-prompt", strictLimiter, TestPromptProxy);
 
 app.get("/health", async (req, res) => {
   const [state, backupHealth] = await Promise.all([
@@ -78,7 +88,7 @@ if (process.env.SENTRY_DSN) {
   ) {
     (
       Sentry as unknown as {
-        setupExpressErrorHandler: (app: Application) => void;
+        setupExpressErrorHandler: (app: express.Application) => void;
       }
     ).setupExpressErrorHandler(app);
   } else if (
@@ -88,7 +98,7 @@ if (process.env.SENTRY_DSN) {
     app.use(
       (
         Sentry as unknown as {
-          expressErrorHandler: () => ErrorRequestHandler;
+          expressErrorHandler: () => express.ErrorRequestHandler;
         }
       ).expressErrorHandler(),
     );
@@ -99,6 +109,6 @@ app.listen(port, () => {
   startIndexer().catch((err) => {
     console.error("Failed to start Soroban Indexer:", err);
   });
-startIndexer().catch((err) => {
-  console.error("Failed to start Soroban Indexer:", err);
 });
+
+export default app;
