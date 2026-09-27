@@ -16,17 +16,17 @@ import { libraryRouter } from "./routes/libraryRoutes";
 import { provenanceRouter } from "./routes/provenanceRoutes";
 import { walletSessionRouter } from "./routes/walletSessionRoutes";
 import { marketplaceRouter } from "./routes/marketplaceRoutes";
-import { featureFlagRouter } from "./routes/featureFlagRoutes";
-import { supportCaseRouter } from "./routes/supportCaseRoutes";
-import { qualityCheckRouter } from "./routes/qualityCheckRoutes";
-import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes";
-import { operationalHealthRouter } from "./routes/operationalHealthRoutes";
-import { drRouter } from "./routes/drRoutes";
+import { featureFlagRouter } from "./routes/featureFlagRoutes.js";
+import { supportCaseRouter } from "./routes/supportCaseRoutes.js";
+import { qualityCheckRouter } from "./routes/qualityCheckRoutes.js";
+import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes.js";
+import { operationalHealthRouter } from "./routes/operationalHealthRoutes.js";
+import { drRouter } from "./routes/drRoutes.js";
 import {
   GetOpenApiSchema,
   GetOpenApiExplorer,
 } from "./controllers/docsControllers";
-import { runBackup, getBackupHealth } from "./services/backupService";
+import { runBackup, getBackupHealth } from "./services/backupService.js";
 import { IndexerState } from "./models/IndexerState";
 import { startIndexer } from "./services/indexer";
 
