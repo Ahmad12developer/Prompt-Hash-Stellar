@@ -8,9 +8,9 @@ import {
 } from "../../src/lib/auth/challenge";
 import {
   decryptPromptCiphertext,
-  hashPromptPlaintext,
   normalizeContentHash,
   unwrapPromptKey,
+  verifyPromptPlaintextHash,
 } from "../../src/lib/crypto/promptCrypto";
 import {
   getPrompt,
@@ -36,8 +36,15 @@ import {
   PurchaseFailureReason,
 } from "../../src/lib/observability/purchaseFunnelMetrics";
 import { recordAuditEvent } from "../../server/src/services/auditTrail";
+import {
+  recordUnlockFailure,
+  recordUnlockSuccess,
+} from "../../server/src/services/purchaseDisputes";
 import { apiError, ErrorCode } from "../../src/lib/api/errorCodes";
-import { validateUnlockSecrets } from "../../src/lib/validation/envValidator";
+import {
+  validateUnlockSecrets,
+  getServerDeploymentManifest,
+} from "../../src/lib/validation/envValidator";
 
 export interface UnlockRequest {
   token: string;
@@ -51,6 +58,8 @@ export interface UnlockSuccessResponse {
   promptId: string;
   title: string;
   contentHash: string;
+  contentHashAlgorithm: "SHA-256";
+  contentHashVersion: 1;
   plaintext: string;
 }
 
@@ -139,18 +148,18 @@ function getActiveSecrets(primarySecret: string): string[] {
 function getServerConfig(): PromptHashConfig {
   const manifest = getServerDeploymentManifest();
   return {
-    rpcUrl,
+    rpcUrl: manifest.rpcUrl,
     rpcUrls: process.env.PUBLIC_STELLAR_RPC_URLS?.split(",")
       .map((url) => url.trim())
       .filter(Boolean),
     entitlementQuorum: process.env.PUBLIC_STELLAR_ENTITLEMENT_QUORUM
       ? Number(process.env.PUBLIC_STELLAR_ENTITLEMENT_QUORUM)
       : undefined,
-    networkPassphrase,
-    promptHashContractId,
-    nativeAssetContractId,
-    simulationAccount,
-    allowHttp: new URL(rpcUrl).hostname === "localhost",
+    networkPassphrase: manifest.networkPassphrase,
+    promptHashContractId: manifest.promptHashContractId,
+    nativeAssetContractId: manifest.nativeAssetContractId,
+    simulationAccount: manifest.simulationAccount,
+    allowHttp: new URL(manifest.rpcUrl).hostname === "localhost",
   };
 }
 
@@ -389,6 +398,9 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
   }
 
   const unlockStartMs = Date.now();
+  // Set once the ledger confirms the buyer paid; from then on a failure is a
+  // paid-but-undelivered purchase and opens a recoverable dispute (#755).
+  let entitlementConfirmed = false;
 
   try {
     // Support multiple active secrets during rotation grace period
@@ -619,6 +631,8 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
       return;
     }
 
+    entitlementConfirmed = true;
+
     req.logger.info(
       {
         address,
@@ -720,10 +734,20 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
       prompt.encryptionIv,
       keyBytes,
     );
-    const contentHash = await hashPromptPlaintext(plaintext);
     const storedHash = normalizeContentHash(prompt.contentHash);
-    if (contentHash !== storedHash) {
-      req.logger.error({ address, promptId }, "Prompt integrity check failed");
+    const integrity = await verifyPromptPlaintextHash(plaintext, storedHash);
+    if (!integrity.valid) {
+      req.logger.error(
+        {
+          address,
+          promptId,
+          expectedHash: integrity.expectedHash,
+          computedHash: integrity.computedHash,
+          hashAlgorithm: integrity.algorithm,
+          hashVersion: integrity.version,
+        },
+        "Prompt integrity check failed",
+      );
       metrics.trackUnlockFailure(
         String(address),
         String(promptId),
@@ -742,14 +766,15 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
         clientIp,
         reason: "integrity_failure",
       });
-      res
-        .status(500)
-        .json(
-          apiError(
-            ErrorCode.INTEGRITY_FAILURE,
-            "Prompt integrity check failed.",
-          ),
-        );
+      void recordUnlockFailure({
+        promptId: String(promptId),
+        buyerWallet: String(address),
+        reason: "integrity_failure",
+        requestId: req.requestId ?? null,
+      });
+      res.status(500).json(
+        apiError(ErrorCode.INTEGRITY_FAILURE, "Prompt integrity check failed."),
+      );
       return;
     }
 
@@ -771,6 +796,11 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
       clientIp,
       reason: null,
     });
+    void recordUnlockSuccess({
+      promptId: String(promptId),
+      buyerWallet: String(address),
+      requestId: req.requestId ?? null,
+    });
 
     // The Soroban indexer is the sole source of `PromptPurchased` webhook
     // deliveries (#536) — it has the authoritative on-chain buyer/price/
@@ -780,7 +810,9 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
     const successResponse: UnlockSuccessResponse = {
       promptId: prompt.id.toString(),
       title: prompt.title,
-      contentHash,
+      contentHash: integrity.computedHash,
+      contentHashAlgorithm: integrity.algorithm,
+      contentHashVersion: integrity.version,
       plaintext,
     };
     if (idempotencyKey) {
@@ -805,7 +837,7 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
     metrics.trackUnlockFailure(String(address), String(promptId), "error");
     metrics.trackUnlockLatency(Date.now() - unlockStartMs);
 
-    // Distinguish expired-challenge errors for finer-grained audit reasons and error codes.
+    // Distinguish expired-challenge and signature/token errors for finer-grained audit reasons and error codes.
     const isExpired = message.toLowerCase().includes("expired");
     const failureReason = isExpired
       ? PurchaseFailureReason.CHALLENGE_EXPIRED
@@ -815,16 +847,34 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
       failureReason,
       Date.now() - unlockStartMs,
     );
+    const isTokenMismatch =
+      message.toLowerCase().includes("does not match");
 
     void recordAuditEvent({
-      action: isExpired ? "unlock_expired_challenge" : "unlock_error",
+      action: isExpired
+        ? "unlock_expired_challenge"
+        : isTokenMismatch
+          ? "unlock_invalid_signature"
+          : "unlock_error",
       result: "failure",
       promptId: promptId ? String(promptId) : null,
       walletAddress: address ? String(address) : null,
       requestId: req.requestId ?? null,
       clientIp,
-      reason: isExpired ? "expired_challenge" : "error",
+      reason: isExpired
+        ? "expired_challenge"
+        : isTokenMismatch
+          ? "invalid_signature"
+          : "error",
     });
+    if (entitlementConfirmed) {
+      void recordUnlockFailure({
+        promptId: String(promptId),
+        buyerWallet: String(address),
+        reason: "unlock_error",
+        requestId: req.requestId ?? null,
+      });
+    }
 
     if (isExpired) {
       const body = apiError(
@@ -843,6 +893,20 @@ async function handler(req: VercelRequest, res: VercelResponse): Promise<void> {
         );
       }
       res.status(400).json(body);
+    } else if (isTokenMismatch) {
+      const body = apiError(ErrorCode.INVALID_SIGNATURE, "Invalid challenge token or signature.");
+      if (idempotencyKey) {
+        void storeIdempotencyResult(
+          String(idempotencyKey),
+          String(token),
+          String(promptId),
+          String(address),
+          String(signedMessage),
+          401,
+          body,
+        );
+      }
+      res.status(401).json(body);
     } else {
       const body = apiError(
         ErrorCode.TEMPORARY_FAILURE,

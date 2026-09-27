@@ -1,118 +1,154 @@
-# Feature Flag Framework
+# Feature Flag Framework & Rollout Runbook
 
-## Overview
+_Issue #813 — Typed Feature Flags, Safe Defaults, Staged Rollout, and Emergency Rollback_
 
-The Feature Flag Framework enables safe, staged rollouts of marketplace changes with fine-grained control over behavior without redeployment.
+## 1. Overview
 
-## Features
+The Feature Flag Framework enables safe, staged rollouts of risky marketplace changes (such as Soroban atomic settlements, new sanitize pipelines, and automated reconciliation) with fine-grained environment controls and instant emergency rollback without requiring a code redeploy.
 
-- **Environment-specific configuration** - Enable flags per environment (development, staging, production)
-- **Percentage-based rollout** - Experimental flags can target a percentage of users
-- **Deterministic rollout** - Same user always gets consistent flag state
-- **Admin management** - Full CRUD operations for flags via protected endpoints
+---
 
-## Data Model
+## 2. Typed Flag Definitions & Safe Defaults
 
-Flags are stored in the `FeatureFlag` collection with the following fields:
+All system feature flags are typed and registered with fail-safe defaults:
+
+| Flag Key | Purpose | Default Status | Environments | Safe Fallback |
+|---|---|---|---|---|
+| `stellar_atomic_settlement` | Soroban multi-prompt atomic settlement contract calls | `disabled` | Dev only | `false` (Legacy settlement) |
+| `bulk_purchase_atomic_v2` | v2 Atomic multi-prompt cart checkout processor | `disabled` | Dev only | `false` (Single checkout) |
+| `prompt_preview_markdown_sanitize_v2` | Enhanced HTML sanitizer stripping dangerous tags/iframes | `enabled` | All | `true` (Strict sanitization) |
+| `payout_reconciliation_auto_resolve` | Automated resolution for zero-drift payout statements | `disabled` | Dev only | `false` (Manual admin approval) |
+| `operational_health_dashboard` | Real-time maintainer health aggregation dashboard | `enabled` | All | `true` (Dashboard active) |
+| `strict_settlement_checks` | On-chain transaction verification before entitlement | `enabled` | All | `true` (Strict verification) |
+
+### Fail-Safe Guarantee
+- If a flag is not found in the database, the system immediately returns its preconfigured **`safeFallback`**.
+- If the database connection is interrupted or errors occur, `featureFlagService` catches the exception and returns the safe fallback without failing the upstream user request.
+
+---
+
+## 3. Data Model
+
+Flags are stored in the MongoDB `FeatureFlag` collection:
 
 ```typescript
 {
-  name: string;              // Unique identifier (lowercase)
-  description: string;       // Human-readable description
+  name: string;              // Unique identifier (lowercase, e.g. "stellar_atomic_settlement")
+  description: string;       // Human-readable purpose
   status: 'enabled' | 'disabled' | 'experimental';
   environments: {
     development?: boolean;
     staging?: boolean;
     production?: boolean;
   };
-  rolloutPercentage: 0-100;  // For experimental flags
-  createdBy: string;         // Admin email
+  rolloutPercentage: number; // 0-100 (for experimental status with consistent hashing)
+  createdBy: string;         // Admin identifier
   createdAt: Date;
   updatedAt: Date;
 }
 ```
 
-## API Endpoints
+---
 
-### Admin Routes (require `flags:write` scope)
+## 4. API Endpoints
 
-**POST /api/flags** - Create a new flag
-```json
-{
-  "name": "new-payment-flow",
-  "description": "New payment flow for risky changes",
-  "status": "experimental",
-  "environments": { "development": true, "staging": true },
-  "rolloutPercentage": 25,
-  "createdBy": "admin@example.com"
-}
-```
+### Public / Client Routes
+- **`GET /api/flags/definitions`**: List all known typed flag definitions and default fallbacks.
+- **`POST /api/flags/check/:name`**: Check if a feature is enabled for a given user / environment context.
+  ```json
+  {
+    "userId": "GD...1234",
+    "environment": "production"
+  }
+  ```
+  **Response**:
+  ```json
+  {
+    "name": "stellar_atomic_settlement",
+    "enabled": false,
+    "reason": "Flag is disabled in environment: production",
+    "source": "database"
+  }
+  ```
 
-**GET /api/flags** - List all flags
+### Admin Routes (Requires `flags:write` / `flags:read` scope)
+- **`GET /api/flags`**: List all stored flags.
+- **`POST /api/flags`**: Create a new feature flag.
+- **`PATCH /api/flags/:name`**: Update status, environments, or rollout percentage.
+- **`DELETE /api/flags/:name`**: Remove a feature flag.
 
-**GET /api/flags/:name** - Get specific flag
+---
 
-**PATCH /api/flags/:name** - Update flag
-```json
-{
-  "status": "enabled",
-  "environments": { "production": true },
-  "rolloutPercentage": 50
-}
-```
+## 5. Usage in Code
 
-**DELETE /api/flags/:name** - Delete flag
-
-### Public Routes
-
-**POST /api/flags/check/:name** - Check if flag is enabled
-```json
-{
-  "userId": "user-wallet-address"
-}
-```
-
-## Usage in Code
-
+### Server-Side Protection
 ```typescript
-import { featureFlagService } from "../services/featureFlagService";
+import { featureFlagService } from "../services/featureFlagService.js";
 
-// Check if feature is enabled
-const isEnabled = await featureFlagService.isEnabled(
-  "new-payment-flow",
-  "production",
-  userWallet
+// Check before executing sensitive path
+const canAutoReconcile = await featureFlagService.isEnabled(
+  "payout_reconciliation_auto_resolve",
+  process.env.NODE_ENV as any
 );
 
-if (isEnabled) {
-  // Execute new flow
+if (canAutoReconcile) {
+  await autoReconcilePayouts();
 } else {
-  // Execute stable flow
+  logger.info("Auto-reconciliation flag disabled; queuing for manual review.");
 }
 ```
 
-## Rollout Strategy
+### Client-Side (React Hook)
+```tsx
+import { useFeatureFlag } from "@/hooks/useFeatureFlag";
 
-1. **Create flag** - Initially disabled on all environments
-2. **Test in dev/staging** - Enable on development and staging
-3. **Gradual rollout** - Set to experimental with 5-25% rollout
-4. **Monitor** - Collect metrics and user feedback
-5. **Full rollout** - Enable for 100% of users
-6. **Cleanup** - Remove flag once stabilized
+export function CheckoutButton({ userWallet }: { userWallet: string }) {
+  const { enabled: atomicEnabled, loading } = useFeatureFlag("bulk_purchase_atomic_v2", userWallet);
 
-## Safety Guarantees
+  if (loading) return <Spinner />;
+  return atomicEnabled ? <AtomicBulkCheckout /> : <StandardCheckout />;
+}
+```
 
-- Disabled flags always return `false` (safe default)
-- Missing flags return `false` (fail-safe)
-- Server-side checks only (client checks are advisory)
-- Rollout is deterministic per user (no flickering)
-- All flag changes are audited
+---
 
-## Best Practices
+## 6. Staged Rollout Workflow
 
-1. **Name flags clearly** - Use kebab-case with domain prefix
-2. **Add descriptions** - Explain what the flag controls
-3. **Test both states** - Test enabled and disabled code paths
-4. **Set defaults safely** - Disabled is the default
-5. **Monitor metrics** - Track impact of flag changes
-6. **Plan cleanup** - Remove old flags after stabilization
+1. **Stage 1: Internal Development Validation**
+   - Register flag with status `enabled` on `development` only.
+   ```bash
+   curl -X POST http://localhost:5000/api/flags \
+     -H "Content-Type: application/json" \
+     -H "Authorization: Bearer $ADMIN_TOKEN" \
+     -d '{"name":"stellar_atomic_settlement","description":"Atomic settlement","status":"enabled","environments":{"development":true,"staging":false,"production":false},"createdBy":"admin"}'
+   ```
+2. **Stage 2: Staging Integration**
+   - Enable on `staging` environment and run automated E2E test suites.
+3. **Stage 3: Experimental Canary Rollout in Production**
+   - Set status to `experimental` with `rolloutPercentage: 10` on `production`.
+   - User wallet addresses are hashed deterministically so individual users experience uniform behavior.
+4. **Stage 4: General Availability (100% Rollout)**
+   - Update flag to `status: "enabled"` with `production: true`.
+
+---
+
+## 7. Emergency Rollback Procedure (Zero Downtime)
+
+If an anomaly, regression, or invariant failure is detected during rollout:
+
+### Immediate Action (1 Command)
+```bash
+curl -X PATCH http://localhost:5000/api/flags/stellar_atomic_settlement \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"status":"disabled","environments":{"production":false}}'
+```
+
+### Verification
+```bash
+curl -X POST http://localhost:5000/api/flags/check/stellar_atomic_settlement \
+  -H "Content-Type: application/json" \
+  -d '{"environment":"production"}'
+# Response must be: {"name":"stellar_atomic_settlement","enabled":false,...}
+```
+All in-flight traffic instantly falls back to the safe, stable execution branch.

@@ -1,16 +1,70 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { featureFlagService } from "../services/featureFlagService.js";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  featureFlagService,
+  KNOWN_FEATURE_FLAGS,
+} from "../services/featureFlagService.js";
 import FeatureFlag from "../models/FeatureFlag.js";
-import mongoose from "mongoose";
 
 describe("FeatureFlagService", () => {
-  beforeEach(async () => {
-    // Clear the collection before each test
-    await FeatureFlag.deleteMany({});
+  const store = new Map<string, any>();
+
+  beforeEach(() => {
+    store.clear();
+    vi.restoreAllMocks();
+
+    vi.spyOn(FeatureFlag.prototype, "save").mockImplementation(function (this: any) {
+      store.set(this.name.toLowerCase(), this);
+      return Promise.resolve(this);
+    });
+
+    vi.spyOn(FeatureFlag, "findOne").mockImplementation((query: any) => {
+      const name = query?.name?.toLowerCase ? query.name.toLowerCase() : query?.name;
+      const found = store.get(name);
+      return found ? (found as any) : null;
+    });
+
+    vi.spyOn(FeatureFlag, "findOneAndUpdate").mockImplementation((query: any, update: any) => {
+      const name = query?.name?.toLowerCase ? query.name.toLowerCase() : query?.name;
+      const existing = store.get(name);
+      if (!existing) return Promise.resolve(null) as any;
+      const updated = {
+        ...existing,
+        ...update,
+        environments: {
+          ...(existing.environments || {}),
+          ...(update.environments || {}),
+        },
+      };
+      store.set(name, updated);
+      return Promise.resolve(updated) as any;
+    });
+
+    vi.spyOn(FeatureFlag, "deleteOne").mockImplementation((query: any) => {
+      const name = query?.name?.toLowerCase ? query.name.toLowerCase() : query?.name;
+      const existed = store.delete(name);
+      return Promise.resolve({ deletedCount: existed ? 1 : 0 }) as any;
+    });
+
+    vi.spyOn(FeatureFlag, "deleteMany").mockImplementation(() => {
+      store.clear();
+      return Promise.resolve({ deletedCount: 0 }) as any;
+    });
+
+    vi.spyOn(FeatureFlag, "find").mockImplementation(() => {
+      return Array.from(store.values()) as any;
+    });
   });
 
-  afterEach(async () => {
-    await FeatureFlag.deleteMany({});
+  afterEach(() => {
+    store.clear();
+    vi.restoreAllMocks();
+  });
+
+  it("should define typed known flags with safe defaults", () => {
+    expect(KNOWN_FEATURE_FLAGS.stellar_atomic_settlement).toBeDefined();
+    expect(KNOWN_FEATURE_FLAGS.stellar_atomic_settlement.safeFallback).toBe(false);
+    expect(KNOWN_FEATURE_FLAGS.prompt_preview_markdown_sanitize_v2.safeFallback).toBe(true);
+    expect(KNOWN_FEATURE_FLAGS.operational_health_dashboard.safeFallback).toBe(true);
   });
 
   it("should create a feature flag", async () => {
@@ -57,6 +111,34 @@ describe("FeatureFlagService", () => {
     expect(isEnabled).toBe(false);
   });
 
+  it("should fall back safely for missing flags", async () => {
+    // Known flag with false fallback
+    const atomicSettlement = await featureFlagService.isEnabled(
+      "stellar_atomic_settlement"
+    );
+    expect(atomicSettlement).toBe(false);
+
+    // Known flag with true safe fallback
+    const sanitizeV2 = await featureFlagService.isEnabled(
+      "prompt_preview_markdown_sanitize_v2"
+    );
+    expect(sanitizeV2).toBe(true);
+
+    // Unknown flag should default to false
+    const unknownFlag = await featureFlagService.isEnabled("non_existent_flag");
+    expect(unknownFlag).toBe(false);
+  });
+
+  it("should fall back safely when database throws error", async () => {
+    vi.spyOn(FeatureFlag, "findOne").mockRejectedValueOnce(new Error("Mongo network error"));
+
+    const evaluation = await featureFlagService.evaluateFlag(
+      "stellar_atomic_settlement"
+    );
+    expect(evaluation.enabled).toBe(false);
+    expect(evaluation.source).toBe("safe_fallback");
+  });
+
   it("should update a flag", async () => {
     await featureFlagService.createFlag({
       name: "test-flag",
@@ -74,7 +156,7 @@ describe("FeatureFlagService", () => {
     expect(updated.environments.production).toBe(true);
   });
 
-  it("should handle experimental flag rollout", async () => {
+  it("should handle experimental flag rollout deterministically", async () => {
     await featureFlagService.createFlag({
       name: "experimental-feature",
       description: "Experimental feature",
@@ -90,11 +172,6 @@ describe("FeatureFlagService", () => {
       "development",
       "user1"
     );
-    const user2Enabled = await featureFlagService.isEnabled(
-      "experimental-feature",
-      "development",
-      "user2"
-    );
 
     // Both should be consistent when called again
     const user1Enabled2 = await featureFlagService.isEnabled(
@@ -103,6 +180,13 @@ describe("FeatureFlagService", () => {
       "user1"
     );
     expect(user1Enabled).toBe(user1Enabled2);
+
+    // Without userId, experimental flag should evaluate to false
+    const anonymousEnabled = await featureFlagService.isEnabled(
+      "experimental-feature",
+      "development"
+    );
+    expect(anonymousEnabled).toBe(false);
   });
 
   it("should delete a flag", async () => {
