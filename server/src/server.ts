@@ -6,17 +6,20 @@ import { userRouter } from "./routes/userRoutes";
 import { chatRouter } from "./routes/chatRoutes";
 import { webhookRouter } from "./routes/webhookRoutes";
 import { versioningRouter } from "./routes/versioningRoutes";
-import { marketplaceRouter } from "./routes/marketplaceRoutes";
-import { featureFlagRouter } from "./routes/featureFlagRoutes.js";
-import { supportCaseRouter } from "./routes/supportCaseRoutes.js";
-import { qualityCheckRouter } from "./routes/qualityCheckRoutes.js";
-import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes.js";
-import { bundleRouter } from "./routes/bundleRoutes";
-import { payoutLedgerRouter } from "./routes/payoutLedgerRoutes";
-import { entitlementRouter } from "./routes/entitlementRoutes";
-import { adminRateLimitRouter } from "./routes/adminRateLimitRoutes";
-import { correlationMiddleware } from "./middleware/correlation";
-import { publishLimiter, purchaseLimiter, reviewLimiter, reportLimiter } from "./middleware/rateLimiter";
+import { governanceRouter } from "./routes/governanceRoutes"; // Issue #113
+import searchRouter from "./routes/searchRoutes";
+import { fulfillmentRouter } from "./routes/fulfillmentRoutes";
+import { reviewRouter } from "./routes/reviewRoutes";
+import { notificationRouter } from "./routes/notificationRoutes";
+import { auditRouter } from "./routes/auditRoutes";
+import { libraryRouter } from "./routes/libraryRoutes";
+import { provenanceRouter } from "./routes/provenanceRoutes";
+import { walletSessionRouter } from "./routes/walletSessionRoutes";
+import {
+  GetOpenApiSchema,
+  GetOpenApiExplorer,
+} from "./controllers/docsControllers";
+import { runBackup, getBackupHealth } from "./services/backupService";
 import { IndexerState } from "./models/IndexerState";
 import { startIndexer } from "./services/indexer";
 import { getBackupHealth } from "./services/backupService";
@@ -35,15 +38,21 @@ app.use("/api/user", userRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/webhooks", webhookRouter);
 app.use("/api/versions", versioningRouter);
-app.use("/api/marketplace", marketplaceRouter);
-app.use("/api/flags", featureFlagRouter);
-app.use("/api/support-cases", supportCaseRouter);
-app.use("/api/quality-checks", qualityCheckRouter);
-app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
-app.use("/api/bundles", bundleRouter);
-app.use("/api/payouts", payoutLedgerRouter);
-app.use("/api/entitlements", entitlementRouter);
-app.use("/api/admin/rate-limits", adminRateLimitRouter);
+app.use("/api/governance", authLimiter, governanceRouter); // Issue #113
+app.use("/api/search", searchRouter);
+app.use("/api/fulfillment", strictLimiter, fulfillmentRouter);
+app.use("/api/reviews", reviewRouter);
+app.use("/api/notifications", authLimiter, notificationRouter);
+app.use("/api/audit", authLimiter, auditRouter); // #783
+app.use("/api/wallet-session", authLimiter, walletSessionRouter); // #753, #784
+app.use("/api/library", libraryRouter); // #784
+app.use("/api/provenance", provenanceRouter); // #753
+
+// Machine-readable API schema + interactive explorer (#713).
+app.get("/api/openapi.json", GetOpenApiSchema);
+app.get("/api/docs", GetOpenApiExplorer);
+
+app.post("/api/test-prompt", strictLimiter, TestPromptProxy);
 
 app.get("/health", async (req, res) => {
   const [state, backupHealth] = await Promise.all([
