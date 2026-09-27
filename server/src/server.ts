@@ -69,7 +69,7 @@ if (process.env.SENTRY_DSN) {
   ) {
     (
       Sentry as unknown as {
-        setupExpressErrorHandler: (app: typeof app) => void;
+        setupExpressErrorHandler: (app: Application) => void;
       }
     ).setupExpressErrorHandler(app);
   } else if (
@@ -79,13 +79,17 @@ if (process.env.SENTRY_DSN) {
     app.use(
       (
         Sentry as unknown as {
-          expressErrorHandler: () => import("express").ErrorRequestHandler;
+          expressErrorHandler: () => ErrorRequestHandler;
         }
       ).expressErrorHandler(),
     );
   }
 }
 
+app.listen(port, () => {
+  startIndexer().catch((err) => {
+    console.error("Failed to start Soroban Indexer:", err);
+  });
 startIndexer().catch((err) => {
   console.error("Failed to start Soroban Indexer:", err);
 });
