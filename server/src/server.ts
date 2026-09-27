@@ -1,5 +1,5 @@
-import express, { type Application, type ErrorRequestHandler } from "express";
-import * as Sentry from "@sentry/node";
+import express from "express";
+import Sentry from "@sentry/node";
 import { proxyrouter } from "./routes/proxyRoutes";
 import { promptRouter } from "./routes/promptRoutes";
 import { userRouter } from "./routes/userRoutes";
@@ -11,9 +11,14 @@ import { featureFlagRouter } from "./routes/featureFlagRoutes.js";
 import { supportCaseRouter } from "./routes/supportCaseRoutes.js";
 import { qualityCheckRouter } from "./routes/qualityCheckRoutes.js";
 import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes.js";
+import { bundleRouter } from "./routes/bundleRoutes";
+import { payoutLedgerRouter } from "./routes/payoutLedgerRoutes";
+import { entitlementRouter } from "./routes/entitlementRoutes";
+import { adminRateLimitRouter } from "./routes/adminRateLimitRoutes";
+import { correlationMiddleware } from "./middleware/correlation";
+import { publishLimiter, purchaseLimiter, reviewLimiter, reportLimiter } from "./middleware/rateLimiter";
 import { IndexerState } from "./models/IndexerState";
 import { startIndexer } from "./services/indexer";
-import { correlationMiddleware } from "./middleware/correlation";
 import { getBackupHealth } from "./services/backupService";
 
 const app = express();
@@ -25,7 +30,7 @@ app.use(express.json());
 app.use(correlationMiddleware);
 
 app.use("/api/improve-proxy", proxyrouter);
-app.use("/api/prompts", promptRouter);
+app.use("/api/prompts", publishLimiter, promptRouter);
 app.use("/api/user", userRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/webhooks", webhookRouter);
@@ -35,6 +40,10 @@ app.use("/api/flags", featureFlagRouter);
 app.use("/api/support-cases", supportCaseRouter);
 app.use("/api/quality-checks", qualityCheckRouter);
 app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
+app.use("/api/bundles", bundleRouter);
+app.use("/api/payouts", payoutLedgerRouter);
+app.use("/api/entitlements", entitlementRouter);
+app.use("/api/admin/rate-limits", adminRateLimitRouter);
 
 app.get("/health", async (req, res) => {
   const [state, backupHealth] = await Promise.all([
