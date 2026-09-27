@@ -1,5 +1,5 @@
-import express from "express";
-import Sentry from "@sentry/node";
+import express, { type Application, type ErrorRequestHandler } from "express";
+import * as Sentry from "@sentry/node";
 import { proxyrouter } from "./routes/proxyRoutes";
 import { promptRouter } from "./routes/promptRoutes";
 import { userRouter } from "./routes/userRoutes";
@@ -29,6 +29,8 @@ import {
 import { runBackup, getBackupHealth } from "./services/backupService.js";
 import { IndexerState } from "./models/IndexerState";
 import { startIndexer } from "./services/indexer";
+import { correlationMiddleware } from "./middleware/correlation";
+import { getBackupHealth } from "./services/backupService";
 
 const app = express();
 
@@ -88,7 +90,7 @@ if (process.env.SENTRY_DSN) {
   ) {
     (
       Sentry as unknown as {
-        setupExpressErrorHandler: (app: express.Application) => void;
+        setupExpressErrorHandler: (app: Application) => void;
       }
     ).setupExpressErrorHandler(app);
   } else if (
@@ -98,7 +100,7 @@ if (process.env.SENTRY_DSN) {
     app.use(
       (
         Sentry as unknown as {
-          expressErrorHandler: () => express.ErrorRequestHandler;
+          expressErrorHandler: () => ErrorRequestHandler;
         }
       ).expressErrorHandler(),
     );
@@ -109,6 +111,8 @@ app.listen(port, () => {
   startIndexer().catch((err) => {
     console.error("Failed to start Soroban Indexer:", err);
   });
+startIndexer().catch((err) => {
+  console.error("Failed to start Soroban Indexer:", err);
 });
 
 export default app;
