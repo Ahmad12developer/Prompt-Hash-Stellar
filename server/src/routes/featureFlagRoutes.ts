@@ -1,8 +1,18 @@
 import express from "express";
-import { featureFlagService } from "../services/featureFlagService.js";
+import {
+  featureFlagService,
+  KNOWN_FEATURE_FLAGS,
+} from "../services/featureFlagService.js";
 import { requireAdminScope } from "../middleware/adminAuth.js";
 
 export const featureFlagRouter = express.Router();
+
+// List known system flag definitions and safe defaults
+featureFlagRouter.get("/definitions", (_req, res) => {
+  res.json({
+    flags: KNOWN_FEATURE_FLAGS,
+  });
+});
 
 // Admin routes
 featureFlagRouter.post(
@@ -91,11 +101,16 @@ featureFlagRouter.post(
   "/check/:name",
   async (req, res) => {
     try {
-      const { userId } = req.body;
-      const isEnabled = await featureFlagService.isEnabled(req.params.name, undefined, userId);
-      res.json({ enabled: isEnabled });
+      const { userId, environment } = req.body;
+      const evaluation = await featureFlagService.evaluateFlag(
+        req.params.name,
+        environment,
+        userId
+      );
+      res.json(evaluation);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
   }
 );
+

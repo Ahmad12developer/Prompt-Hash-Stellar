@@ -106,7 +106,25 @@ The script will:
 
 ---
 
+### Step 4: Post-Restore Domain Invariant Validation (Issue #816)
+
+Before enabling live traffic, execute the read-only domain invariants verification suite to prove data integrity, valid foreign keys, non-duplicated transactions, and balanced payout records:
+
+```bash
+# Run read-only domain invariants validation:
+ts-node server/scripts/validateRestoreInvariants.ts
+
+# Or with strict validation:
+ts-node server/scripts/validateRestoreInvariants.ts --strict
+```
+
+If any CRITICAL or HIGH severity violation is reported, halt and triage according to [Disaster Recovery Invariant Validation Runbook](../disaster-recovery-validation.md).
+
+---
+
 ## 4. Security & Replay Prevention
 
 - **Corrupted Backup Protection**: Any tampered byte or incomplete upload triggers a checksum mismatch and halts restore before live data is touched.
 - **Event Replay Guard**: IndexerState restore restores event cursor positions so processed on-chain events are not replayed twice.
+- **Domain Invariant Gate**: Read-only invariant validation ensures no orphaned or duplicated records are exposed to live marketplace operations.
+
