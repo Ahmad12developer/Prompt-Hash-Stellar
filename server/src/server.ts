@@ -1,4 +1,5 @@
 import express from "express";
+import Sentry from "@sentry/node";
 import { proxyrouter } from "./routes/proxyRoutes";
 import { promptRouter } from "./routes/promptRoutes";
 import { userRouter } from "./routes/userRoutes";
@@ -21,6 +22,7 @@ import {
 import { runBackup, getBackupHealth } from "./services/backupService";
 import { IndexerState } from "./models/IndexerState";
 import { startIndexer } from "./services/indexer";
+import { getBackupHealth } from "./services/backupService";
 
 const app = express();
 
@@ -31,7 +33,7 @@ app.use(express.json());
 app.use(correlationMiddleware);
 
 app.use("/api/improve-proxy", proxyrouter);
-app.use("/api/prompts", promptRouter);
+app.use("/api/prompts", publishLimiter, promptRouter);
 app.use("/api/user", userRouter);
 app.use("/api/chat", chatRouter);
 app.use("/api/webhooks", webhookRouter);
@@ -76,7 +78,7 @@ if (process.env.SENTRY_DSN) {
   ) {
     (
       Sentry as unknown as {
-        setupExpressErrorHandler: (app: typeof app) => void;
+        setupExpressErrorHandler: (app: Application) => void;
       }
     ).setupExpressErrorHandler(app);
   } else if (
@@ -86,13 +88,17 @@ if (process.env.SENTRY_DSN) {
     app.use(
       (
         Sentry as unknown as {
-          expressErrorHandler: () => import("express").ErrorRequestHandler;
+          expressErrorHandler: () => ErrorRequestHandler;
         }
       ).expressErrorHandler(),
     );
   }
 }
 
+app.listen(port, () => {
+  startIndexer().catch((err) => {
+    console.error("Failed to start Soroban Indexer:", err);
+  });
 startIndexer().catch((err) => {
   console.error("Failed to start Soroban Indexer:", err);
 });
