@@ -151,20 +151,79 @@ export const MARKDOWN_SANITIZE_SCHEMA = {
 } as const;
 
 /**
+ * Normalizes and decodes obfuscated characters to check for protocol evasion.
+ */
+function normalizeObfuscatedUrl(raw: string): string {
+  let normalized = raw.replace(/[\x00-\x1f\x7f]/g, "").trim();
+
+  normalized = normalized.replace(/&#x([0-9a-fA-F]+);?/gi, (_, hex) => {
+    try {
+      return String.fromCharCode(parseInt(hex, 16));
+    } catch {
+      return "";
+    }
+  });
+  normalized = normalized.replace(/&#([0-9]+);?/g, (_, dec) => {
+    try {
+      return String.fromCharCode(parseInt(dec, 10));
+    } catch {
+      return "";
+    }
+  });
+
+  return normalized;
+}
+
+/**
  * Check whether a URL string uses an allowed protocol.
- * Returns false for javascript:, data:, vbscript:, file:, blob:, etc.
+ * Returns false for javascript:, data:, vbscript:, file:, blob:, embedded credentials, etc.
  */
 export function isSafeUrl(url: string, allowList: readonly string[] = ALLOWED_PROTOCOLS): boolean {
-  if (!url) return false;
-  const trimmed = url.trim();
+  if (!url || typeof url !== "string") return false;
+
+  const normalized = normalizeObfuscatedUrl(url);
+  if (!normalized) return false;
+
   // Relative URLs and anchors are treated as unsafe in previews — force absolute
   // to prevent open-redirect or base-tag tricks.
-  if (trimmed.startsWith("#") || trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../")) {
+  if (
+    normalized.startsWith("#") ||
+    normalized.startsWith("/") ||
+    normalized.startsWith("./") ||
+    normalized.startsWith("../")
+  ) {
     return false;
   }
+
+  // Detect whitespace/tab injection before or within scheme (e.g. 'jav\tascript:')
+  const schemeCandidate = normalized.split(":")[0];
+  if (/[\s\r\n\t]/.test(schemeCandidate)) {
+    return false;
+  }
+
+  // Pre-filter forbidden protocol patterns
+  if (
+    /^(javascript|vbscript|data|file|blob|about|filesystem):/i.test(
+      normalized.replace(/\s+/g, ""),
+    )
+  ) {
+    return false;
+  }
+
   try {
-    const parsed = new URL(trimmed);
+    const parsed = new URL(normalized);
     const protocol = parsed.protocol.replace(/:$/, "").toLowerCase();
+
+    // Reject URLs with embedded credentials (e.g. https://user:pass@victim.com)
+    if (parsed.username || parsed.password) {
+      return false;
+    }
+
+    // Hostname must be non-empty and valid
+    if (!parsed.hostname || parsed.hostname.trim() === "") {
+      return false;
+    }
+
     return (allowList as readonly string[]).includes(protocol);
   } catch {
     return false;
@@ -179,8 +238,15 @@ export function isSafeImageUrl(url: string): boolean {
  * Extra guard: detect event-handler-like attribute names.
  */
 export function isDangerousAttribute(name: string): boolean {
-  const lower = name.toLowerCase();
-  return lower.startsWith("on") || lower === "style" || lower === "xmlns" || lower === "formaction" || lower === "xlink:href";
+  const lower = name.toLowerCase().trim();
+  return (
+    lower.startsWith("on") ||
+    lower === "style" ||
+    lower === "xmlns" ||
+    lower === "formaction" ||
+    lower === "xlink:href" ||
+    lower.startsWith("data-")
+  );
 }
 
 export const SUPPORTED_MARKDOWN_DOC = `

@@ -58,6 +58,16 @@ export function sanitizeLinkHref(href: string | undefined): string | null {
 }
 
 /**
+ * Validate and sanitize external URL for profile websites, social links, and outbound redirects.
+ */
+export function sanitizeExternalUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!isSafeUrl(trimmed)) return null;
+  return trimmed;
+}
+
+/**
  * Validate image src. Only https is allowed for marketplace previews.
  */
 export function sanitizeImageSrc(src: string | undefined): string | null {
