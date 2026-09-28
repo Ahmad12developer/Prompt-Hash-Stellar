@@ -5,6 +5,7 @@ import User from "../models/User";
 import OwnershipTransfer, {
   TRANSFER_TTL_MS,
 } from "../models/OwnershipTransfer";
+import { ApprovalService } from "../services/approvalService";
 import { logger } from "../services/structuredLogger";
 
 /**
@@ -215,6 +216,20 @@ export const RespondOwnershipTransfer = async (
       { $set: { status: "expired" } },
     );
     return res.status(410).json({ error: "Transfer request has expired." });
+  }
+
+  // Check for valid maintainer approval before allowing transfer approval
+  const approvalCheck = await ApprovalService.checkProtectedActionApproval({
+    actionId: transfer._id.toString(),
+    actionType: "ownershipTransfer",
+    scope: "TRANSFER",
+    actor: walletAddress.toLowerCase(),
+    actionPath: "/api/prompts/transfers/respond",
+  });
+
+  if (approvalCheck.requiresApproval && !approvalCheck.approved) {
+    const rejectionReason = approvalCheck.reason || "No valid approval";
+    return res.status(403).json({ error: `${rejectionReason}. Maintainer approval required.` });
   }
 
   if (decision === "approved") {
