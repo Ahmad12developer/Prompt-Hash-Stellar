@@ -22,6 +22,7 @@ import { qualityCheckRouter } from "./routes/qualityCheckRoutes.js";
 import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes.js";
 import { operationalHealthRouter } from "./routes/operationalHealthRoutes.js";
 import { drRouter } from "./routes/drRoutes.js";
+import { exportRouter } from "./routes/exportRoutes.js";
 import {
   GetOpenApiSchema,
   GetOpenApiExplorer,
@@ -32,6 +33,14 @@ import { startIndexer } from "./services/indexer";
 import { correlationMiddleware } from "./middleware/correlation";
 import { errorHandlerMiddleware } from "./middleware/errorHandler";
 import { runDataIntegrityCheck } from "./services/dataIntegrityMonitor";
+import {
+  runUserExport,
+  listUserExports,
+  cleanupExpiredExports,
+  verifyExportChecksum,
+  EXPORT_SCOPES,
+  EXPORT_RETENTION_MS,
+} from "./services/exportService";
 
 const app = express();
 
@@ -61,6 +70,10 @@ app.use("/api/support-cases", supportCaseRouter);
 app.use("/api/quality-checks", qualityCheckRouter);
 app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
 app.use("/api/admin/operational-health", operationalHealthRouter);
+// Export routes for user-owned data (requires authentication)
+// Machine-readable API schema + interactive explorer (#713).
+app.use("/api/exports", exportRouter)
+app.get("/api/openapi.json", GetOpenApiSchema);
 app.use("/api/admin/dr", drRouter);
 
 // Apply correlation ID middleware to all routes
