@@ -22,6 +22,9 @@ import { qualityCheckRouter } from "./routes/qualityCheckRoutes.js";
 import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes.js";
 import { operationalHealthRouter } from "./routes/operationalHealthRoutes.js";
 import { drRouter } from "./routes/drRoutes.js";
+import { policyLimitRouter } from "./routes/policyLimitRoutes";
+import { operationRecoveryRouter } from "./routes/operationRecoveryRoutes";
+import { receiptRouter } from "./routes/receiptRoutes";
 import {
   GetOpenApiSchema,
   GetOpenApiExplorer,
@@ -30,7 +33,6 @@ import { runBackup, getBackupHealth } from "./services/backupService.js";
 import { IndexerState } from "./models/IndexerState";
 import { startIndexer } from "./services/indexer";
 import { correlationMiddleware } from "./middleware/correlation";
-import { getBackupHealth } from "./services/backupService";
 
 const app = express();
 
@@ -61,6 +63,9 @@ app.use("/api/quality-checks", qualityCheckRouter);
 app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
 app.use("/api/admin/operational-health", operationalHealthRouter);
 app.use("/api/admin/dr", drRouter);
+app.use("/api/admin/policy-limits", policyLimitRouter);
+app.use("/api/recovery", operationRecoveryRouter);
+app.use("/api/receipts", receiptRouter);
 
 // Machine-readable API schema + interactive explorer (#713).
 app.get("/api/openapi.json", GetOpenApiSchema);
@@ -111,8 +116,6 @@ app.listen(port, () => {
   startIndexer().catch((err) => {
     console.error("Failed to start Soroban Indexer:", err);
   });
-startIndexer().catch((err) => {
-  console.error("Failed to start Soroban Indexer:", err);
 });
 
 export default app;

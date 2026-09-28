@@ -19,7 +19,8 @@ import {
   invalidatePromptCaches,
   METADATA_TTL_SECONDS,
 } from "./cacheService";
-import { decodeEvent } from "../../../packages/sdk/src/events/decode.js";
+import os from "os";
+import { decodeEvent } from "@prompthash/sdk";
 import { logger } from "./structuredLogger";
 import { applyDisputeTransition } from "./purchaseDisputes";
 
