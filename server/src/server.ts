@@ -30,7 +30,8 @@ import { runBackup, getBackupHealth } from "./services/backupService.js";
 import { IndexerState } from "./models/IndexerState";
 import { startIndexer } from "./services/indexer";
 import { correlationMiddleware } from "./middleware/correlation";
-import { getBackupHealth } from "./services/backupService";
+import { errorHandlerMiddleware } from "./middleware/errorHandler";
+import { runDataIntegrityCheck } from "./services/dataIntegrityMonitor";
 
 const app = express();
 
@@ -62,6 +63,12 @@ app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
 app.use("/api/admin/operational-health", operationalHealthRouter);
 app.use("/api/admin/dr", drRouter);
 
+// Apply correlation ID middleware to all routes
+app.use(correlationMiddleware);
+
+// Apply standardized error handler middleware
+app.use(errorHandlerMiddleware);
+
 // Machine-readable API schema + interactive explorer (#713).
 app.get("/api/openapi.json", GetOpenApiSchema);
 app.get("/api/docs", GetOpenApiExplorer);
@@ -79,6 +86,16 @@ app.get("/health", async (req, res) => {
     },
     backup: backupHealth,
   });
+});
+
+// Run data integrity check endpoint (admin only)
+app.post("/api/admin/integrity-check", async (req, res) => {
+  try {
+    const report = await runDataIntegrityCheck();
+    res.json({ success: true, data: report });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to run integrity check" });
+  }
 });
 
 // Sentry error handler must be registered after all routes (#332).
@@ -111,8 +128,8 @@ app.listen(port, () => {
   startIndexer().catch((err) => {
     console.error("Failed to start Soroban Indexer:", err);
   });
-startIndexer().catch((err) => {
-  console.error("Failed to start Soroban Indexer:", err);
-});
+  startIndexer().catch((err) => {
+    console.error("Failed to start Soroban Indexer:", err);
+  });
 
 export default app;
