@@ -4,8 +4,7 @@ import Prompt from "../models/Prompt";
 import PromptVersion from "../models/PromptVersion";
 import Purchase from "../models/Purchase";
 import User from "../models/User";
-import Notification from "../models/Notification";
-import { invalidatePromptCaches } from "../services/cacheService";
+import { notifyPromptUpdateBuyers } from "../services/notificationDelivery";
 
 export const PostPromptUpdate = async (req: Request, res: Response): Promise<Response> => {
   try {
@@ -42,19 +41,7 @@ export const PostPromptUpdate = async (req: Request, res: Response): Promise<Res
 
     // Notify all buyers of this prompt about the update
     const purchases = await Purchase.find({ promptId: String(prompt._id) });
-    const notificationPromises = purchases.map((purchase: any) =>
-      Notification.create({
-        recipientWallet: purchase.buyerWallet,
-        promptId: String(prompt._id),
-        promptTitle: prompt.title,
-        type: "prompt_update",
-        message: `"${prompt.title}" has been updated by the creator.`,
-        versionIndex: nextVersion,
-        changeNote: changeNote ?? "",
-        read: false,
-      })
-    );
-    await Promise.all(notificationPromises);
+    await notifyPromptUpdateBuyers(purchases, prompt, nextVersion, changeNote ?? "");
 
     return res.status(201).json({ message: "Version posted.", versionIndex: nextVersion });
   } catch (err) {
