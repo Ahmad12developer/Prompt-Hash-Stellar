@@ -23,6 +23,9 @@ import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRou
 import { operationalHealthRouter } from "./routes/operationalHealthRoutes.js";
 import { drRouter } from "./routes/drRoutes.js";
 import { exportRouter } from "./routes/exportRoutes.js";
+import { policyLimitRouter } from "./routes/policyLimitRoutes";
+import { operationRecoveryRouter } from "./routes/operationRecoveryRoutes";
+import { receiptRouter } from "./routes/receiptRoutes";
 import {
   GetOpenApiSchema,
   GetOpenApiExplorer,
@@ -75,6 +78,9 @@ app.use("/api/admin/operational-health", operationalHealthRouter);
 app.use("/api/exports", exportRouter)
 app.get("/api/openapi.json", GetOpenApiSchema);
 app.use("/api/admin/dr", drRouter);
+app.use("/api/admin/policy-limits", policyLimitRouter);
+app.use("/api/recovery", operationRecoveryRouter);
+app.use("/api/receipts", receiptRouter);
 
 // Apply correlation ID middleware to all routes
 app.use(correlationMiddleware);

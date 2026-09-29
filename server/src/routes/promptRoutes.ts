@@ -38,6 +38,7 @@ import {
 } from "../controllers/licensingControllers";
 import { requireAdminScope } from "../middleware/adminAuth";
 import { reportLimiter, publishLimiter } from "../middleware/rateLimiter";
+import { enforcePolicyLimit } from "../middleware/policyLimitMiddleware";
 
 export const promptRouter = express.Router();
 
@@ -76,7 +77,11 @@ promptRouter.get("/creator/:walletAddress/drafts", GetDraftPrompts);
 promptRouter.get("/hash/:contentHash", GetPromptsByContentHash);
 
 // Semantic similarity check for anti-plagiarism
-promptRouter.post("/similarity/check", CheckSimilarity);
+promptRouter.post(
+  "/similarity/check",
+  enforcePolicyLimit("COMPUTE_SIMILARITY_CHECK"),
+  CheckSimilarity
+);
 
 // Preview analytics (#257)
 promptRouter.post("/preview", RecordPreview);
