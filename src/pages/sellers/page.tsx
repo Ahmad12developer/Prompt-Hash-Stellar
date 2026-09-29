@@ -6,6 +6,7 @@ import {
   BadgeCheck,
   BarChart3,
   Clock,
+  ExternalLink,
   Loader2,
   PackageSearch,
   ShoppingBag,
@@ -31,6 +32,13 @@ import {
   CreatorReputationSummary,
   CreatorVerifiedBadge,
 } from "@/components/reputation/CreatorReputationBadge";
+import {
+  getCreatorProfile,
+  getCreatorDisplayName,
+  shortenCreatorAddress,
+} from "@/lib/profiles/creatorProfile";
+import { shortenAddress } from "@/lib/utils";
+import { sanitizeExternalUrl } from "@/lib/preview/sanitize";
 
 const isMarketplaceConfigured = Boolean(
   browserStellarConfig.promptHashContractId &&
@@ -130,37 +138,50 @@ export default function SellerPage() {
                 {profile?.bio ||
                   "Browse active prompt licenses from this creator and review their marketplace activity before unlocking a prompt."}
               </p>
-              {(profile?.websiteUrl ||
-                profile?.twitterHandle ||
-                profile?.metadataUri) && (
-                <div className="mt-5 flex flex-wrap gap-3">
-                  {profile.websiteUrl ? (
-                    <a
-                      href={profile.websiteUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-200 hover:border-emerald-300/40 hover:text-emerald-200"
-                    >
-                      Website <ExternalLink className="h-3.5 w-3.5" />
-                    </a>
-                  ) : null}
-                  {profile.twitterHandle ? (
-                    <a
-                      href={`https://x.com/${profile.twitterHandle.replace(/^@/, "")}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-200 hover:border-emerald-300/40 hover:text-emerald-200"
-                    >
-                      {profile.twitterHandle}
-                    </a>
-                  ) : null}
-                  {profile.metadataUri ? (
-                    <span className="inline-flex items-center rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1.5 text-sm text-cyan-100">
-                      IPFS profile
-                    </span>
-                  ) : null}
-                </div>
-              )}
+              {(() => {
+                const safeWebsite = profile?.websiteUrl
+                  ? sanitizeExternalUrl(profile.websiteUrl)
+                  : null;
+                const cleanTwitter = profile?.twitterHandle
+                  ? profile.twitterHandle
+                      .replace(/^@/, "")
+                      .replace(/[^a-zA-Z0-9_]/g, "")
+                  : null;
+
+                if (!safeWebsite && !cleanTwitter && !profile?.metadataUri) {
+                  return null;
+                }
+
+                return (
+                  <div className="mt-5 flex flex-wrap gap-3">
+                    {safeWebsite ? (
+                      <a
+                        href={safeWebsite}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-200 hover:border-emerald-300/40 hover:text-emerald-200"
+                      >
+                        Website <ExternalLink className="h-3.5 w-3.5" />
+                      </a>
+                    ) : null}
+                    {cleanTwitter ? (
+                      <a
+                        href={`https://x.com/${cleanTwitter}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-slate-200 hover:border-emerald-300/40 hover:text-emerald-200"
+                      >
+                        @{cleanTwitter}
+                      </a>
+                    ) : null}
+                    {profile?.metadataUri ? (
+                      <span className="inline-flex items-center rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1.5 text-sm text-cyan-100">
+                        IPFS profile
+                      </span>
+                    ) : null}
+                  </div>
+                );
+              })()}
               {sellerAddress && (
                 <p className="mt-5 break-all rounded-2xl border border-white/10 bg-slate-950/50 px-4 py-3 font-mono text-xs text-slate-300 sm:text-sm">
                   {sellerAddress}

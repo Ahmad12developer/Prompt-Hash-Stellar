@@ -1,8 +1,10 @@
 import { lazy, Suspense, useState } from "react";
-import { Outlet, Route, Routes, Navigate } from "react-router-dom";
+import { Outlet, Route, Routes, Navigate, useLocation } from "react-router-dom";
+import { AnimatePresence } from "framer-motion";
 import Home from "./pages/Home";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { KeyboardShortcutsModal } from "./components/KeyboardShortcutsModal";
+import PageTransition from "./components/PageTransition";
 
 // Code Splitting / Lazy Loading Router Configurations
 const BrowsePage = lazy(() => import("./pages/browse/page.tsx"));
@@ -21,15 +23,23 @@ const AdminReportsPage = lazy(() => import("./pages/admin/Reports.tsx"));
 const AdminConfigPage = lazy(
   () => import("./pages/admin/ConfigDashboard.tsx"),
 );
+const AdminDisputesPage = lazy(() => import("./pages/admin/Disputes.tsx"));
 
 import { OfflineBanner } from "./components/OfflineBanner";
 
-const AppLayout = () => (
-  <main className="min-h-screen bg-slate-950 text-white">
-    <OfflineBanner />
-    <Outlet />
-  </main>
-);
+const AppLayout = () => {
+  const location = useLocation();
+  return (
+    <main className="min-h-screen bg-slate-950 text-white">
+      <OfflineBanner />
+      <AnimatePresence mode="wait">
+        <PageTransition key={location.pathname}>
+          <Outlet />
+        </PageTransition>
+      </AnimatePresence>
+    </main>
+  );
+};
 
 function App() {
   const [showShortcutsModal, setShowShortcutsModal] = useState(false);
@@ -57,6 +67,7 @@ function App() {
           <Route path="/sellers/:sellerId" element={<SellerPage />} />
           <Route path="/admin/reports" element={<AdminReportsPage />} />
           <Route path="/admin/config" element={<AdminConfigPage />} />
+          <Route path="/admin/disputes" element={<AdminDisputesPage />} />
           <Route path="*" element={<Home />} />
         </Route>
       </Routes>

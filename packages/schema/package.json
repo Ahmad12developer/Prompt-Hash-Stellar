@@ -6,20 +6,21 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
     }
   },
   "scripts": {
     "build": "tsc",
-    "prepare": "tsc",
     "test": "vitest run"
   },
   "dependencies": {
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/uuid": "^10.0.0",
     "typescript": "^5.0.0",
     "vitest": "^2.0.0"
   }

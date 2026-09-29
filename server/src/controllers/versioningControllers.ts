@@ -33,6 +33,12 @@ export const PostPromptUpdate = async (req: Request, res: Response): Promise<Res
 
     await Prompt.findByIdAndUpdate(prompt._id, { currentVersionIndex: nextVersion });
 
+    // Invalidate read caches on update
+    await invalidatePromptCaches(String(prompt._id));
+    if (prompt.onChainId) {
+      await invalidatePromptCaches(String(prompt.onChainId));
+    }
+
     // Notify all buyers of this prompt about the update
     const purchases = await Purchase.find({ promptId: String(prompt._id) });
     await notifyPromptUpdateBuyers(purchases, prompt, nextVersion, changeNote ?? "");
@@ -116,15 +122,20 @@ export const GetBuyerVersion = async (req: Request, res: Response): Promise<Resp
       versionIndex: purchase.versionIndex,
     });
 
-    const prompt = await Prompt.findById(promptId).lean();
+    let content = version?.content ?? null;
+    if (content === null) {
+      const prompt = await Prompt.findById(promptId).catch(() => null);
+      content = (prompt as any)?.content ?? null;
+    }
 
     return res.json({
       versionIndex: purchase.versionIndex,
       changeNote: version?.changeNote ?? "",
-      content: version?.content ?? (prompt as any)?.content ?? null,
+      content,
       purchasedAt: purchase.createdAt,
     });
   } catch (err) {
     return res.status(500).json({ error: (err as Error).message });
   }
 };
+

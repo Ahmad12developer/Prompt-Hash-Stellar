@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Keypair } from "@stellar/stellar-sdk";
 import {
   buildChallengeMessage,
+  computeListingSnapshotHash,
   createChallengeToken,
   globalNonceLedger,
 } from "../../src/lib/auth/challenge";
@@ -17,7 +18,7 @@ const verifyEntitlementMock = vi.fn();
 const getPromptMock = vi.fn();
 const unwrapPromptKeyMock = vi.fn();
 const decryptPromptCiphertextMock = vi.fn();
-const hashPromptPlaintextMock = vi.fn();
+const verifyPromptPlaintextHashMock = vi.fn();
 
 vi.mock("../../src/lib/stellar/promptHashClient", () => ({
   hasAccess: (...args: unknown[]) => hasAccessMock(...args),
@@ -29,7 +30,7 @@ vi.mock("../../src/lib/stellar/promptHashClient", () => ({
 vi.mock("../../src/lib/crypto/promptCrypto", () => ({
   unwrapPromptKey: (...args: unknown[]) => unwrapPromptKeyMock(...args),
   decryptPromptCiphertext: (...args: unknown[]) => decryptPromptCiphertextMock(...args),
-  hashPromptPlaintext: (...args: unknown[]) => hashPromptPlaintextMock(...args),
+  verifyPromptPlaintextHash: (...args: unknown[]) => verifyPromptPlaintextHashMock(...args),
   normalizeContentHash: (hash: string) => hash.toLowerCase(),
 }));
 
@@ -52,6 +53,7 @@ vi.mock("../../src/lib/observability/metrics", () => ({
     trackUnlockSuccess: vi.fn(),
     trackUnlockFailure: vi.fn(),
     trackRateLimitHit: vi.fn(),
+    trackUnlockLatency: vi.fn(),
   },
 }));
 
@@ -59,7 +61,25 @@ vi.mock("../../server/src/services/auditTrail", () => ({
   recordAuditEvent: vi.fn(),
 }));
 
+const recordUnlockFailureMock = vi.fn();
+const recordUnlockSuccessMock = vi.fn();
+
+vi.mock("../../server/src/services/purchaseDisputes", () => ({
+  recordUnlockFailure: (...args: unknown[]) => recordUnlockFailureMock(...args),
+  recordUnlockSuccess: (...args: unknown[]) => recordUnlockSuccessMock(...args),
+}));
+
 import handler from "./unlock";
+
+const TEST_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+const TEST_CONTRACT_ID =
+  "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+const TEST_CHALLENGE_CONTEXT = {
+  origin: "",
+  networkPassphrase: TEST_NETWORK_PASSPHRASE,
+  contractId: TEST_CONTRACT_ID,
+  action: "unlock",
+};
 
 async function setupUnlockFixture(plaintext = PLAINTEXT) {
   const buyer = Keypair.random();
@@ -68,8 +88,8 @@ async function setupUnlockFixture(plaintext = PLAINTEXT) {
   process.env.CHALLENGE_TOKEN_SECRET = "integration-test-challenge-secret";
   process.env.UNLOCK_PUBLIC_KEY = "d".repeat(32);
   process.env.UNLOCK_PRIVATE_KEY = "e".repeat(32);
-  process.env.PUBLIC_PROMPT_HASH_CONTRACT_ID =
-    "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC";
+  process.env.PUBLIC_PROMPT_HASH_CONTRACT_ID = TEST_CONTRACT_ID;
+  process.env.PUBLIC_STELLAR_NETWORK_PASSPHRASE = TEST_NETWORK_PASSPHRASE;
   process.env.PUBLIC_STELLAR_SIMULATION_ACCOUNT = buyer.publicKey();
   process.env.PUBLIC_STELLAR_RPC_URL = "https://soroban-testnet.stellar.org";
 
@@ -78,6 +98,9 @@ async function setupUnlockFixture(plaintext = PLAINTEXT) {
     process.env.CHALLENGE_TOKEN_SECRET,
     buyer.publicKey(),
     promptId,
+    Date.now(),
+    5 * 60 * 1000,
+    TEST_CHALLENGE_CONTEXT,
   );
   const signedMessage = Buffer.from(
     buyer.sign(Buffer.from(challenge.challenge, "utf8")),
@@ -88,7 +111,7 @@ async function setupUnlockFixture(plaintext = PLAINTEXT) {
     ledgerSequence: 123456,
     ledgerHash: "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890",
     networkId: "testnet",
-    contractId: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+    contractId: TEST_CONTRACT_ID,
     checkedAt: Date.now(),
   });
   hasAccessMock.mockResolvedValue(true);
@@ -103,7 +126,13 @@ async function setupUnlockFixture(plaintext = PLAINTEXT) {
   });
   unwrapPromptKeyMock.mockResolvedValue(new Uint8Array(32));
   decryptPromptCiphertextMock.mockResolvedValue(plaintext);
-  hashPromptPlaintextMock.mockResolvedValue(contentHash);
+  verifyPromptPlaintextHashMock.mockResolvedValue({
+    valid: true,
+    algorithm: "SHA-256",
+    version: 1,
+    expectedHash: contentHash,
+    computedHash: contentHash,
+  });
 
   return { buyer, promptId, challenge, signedMessage, contentHash, plaintext };
 }
@@ -163,13 +192,22 @@ describe("unlock API integrity checks", () => {
     expect(statusCode).toBe(200);
     expect(responseData.plaintext).toBe(plaintext);
     expect(responseData.contentHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(responseData.contentHashAlgorithm).toBe("SHA-256");
+    expect(responseData.contentHashVersion).toBe(1);
+    expect(verifyPromptPlaintextHashMock).toHaveBeenCalledWith(plaintext, CONTENT_HASH);
   });
 
   it("fails safely when the recomputed hash does not match", async () => {
     const { buyer, promptId, challenge, signedMessage } =
       await setupUnlockFixture("Matching plaintext body.");
 
-    hashPromptPlaintextMock.mockResolvedValue("b".repeat(64));
+    verifyPromptPlaintextHashMock.mockResolvedValue({
+      valid: false,
+      algorithm: "SHA-256",
+      version: 1,
+      expectedHash: CONTENT_HASH,
+      computedHash: "b".repeat(64),
+    });
 
     const { statusCode, responseData } = await invokeUnlock({
       token: challenge.token,
@@ -182,6 +220,10 @@ describe("unlock API integrity checks", () => {
     expect(responseData.code).toBe(ErrorCode.INTEGRITY_FAILURE);
     expect(responseData.plaintext).toBeUndefined();
     expect(responseData.error).toBe("Prompt integrity check failed.");
+    expect(errorLog).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedHash: CONTENT_HASH, computedHash: "b".repeat(64) }),
+      "Prompt integrity check failed",
+    );
   });
 
   it("does not expose decrypted content in generic error responses", async () => {
@@ -231,10 +273,11 @@ describe("unlock challenge message contract", () => {
       nonce: "nonce-123",
       issuedAt: 1_700_000_000_000,
       expiresAt: 1_700_000_000_000,
+      ...TEST_CHALLENGE_CONTEXT,
     };
 
     expect(buildChallengeMessage(payload)).toBe(
-      "prompt-hash unlock:GBUYERACCOUNT1234567890ABCDEFGH1234567890ABCDEFGH123456789:7:nonce-123:1700000000000:1700000000000",
+      "prompt-hash:unlock::Test SDF Network ; September 2015:CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC:GBUYERACCOUNT1234567890ABCDEFGH1234567890ABCDEFGH123456789:7::::nonce-123:1700000000000:1700000000000",
     );
   });
 });
@@ -281,6 +324,7 @@ describe("unlock API replay, expiry, and missing-field rejection", () => {
       promptId,
       Date.now() - 60_000, // 1 minute ago
       1000,                 // 1 second TTL
+      TEST_CHALLENGE_CONTEXT,
     );
 
     const { statusCode, responseData } = await invokeUnlock({
@@ -462,6 +506,7 @@ describe("unlock API idempotency", () => {
       promptId,
       Date.now() - 60_000,
       1000,
+      TEST_CHALLENGE_CONTEXT,
     );
 
     // First request — fails with expired challenge
@@ -624,7 +669,14 @@ describe("unlock API challenge-token secret rotation grace period (#609)", () =>
     process.env.CHALLENGE_TOKEN_ROTATION_TIMESTAMP = String(BASE_TIME);
     process.env.CHALLENGE_TOKEN_GRACE_PERIOD_MS = "1000";
 
-    const challenge = createChallengeToken(PREVIOUS_SECRET, buyer.publicKey(), promptId, BASE_TIME, LONG_TTL_MS);
+    const challenge = createChallengeToken(
+      PREVIOUS_SECRET,
+      buyer.publicKey(),
+      promptId,
+      BASE_TIME,
+      LONG_TTL_MS,
+      TEST_CHALLENGE_CONTEXT,
+    );
     const signedMessage = Buffer.from(
       buyer.sign(Buffer.from(challenge.challenge, "utf8")),
     ).toString("base64");
@@ -648,7 +700,14 @@ describe("unlock API challenge-token secret rotation grace period (#609)", () =>
     process.env.CHALLENGE_TOKEN_ROTATION_TIMESTAMP = String(BASE_TIME);
     process.env.CHALLENGE_TOKEN_GRACE_PERIOD_MS = "1000";
 
-    const challenge = createChallengeToken(PREVIOUS_SECRET, buyer.publicKey(), promptId, BASE_TIME, LONG_TTL_MS);
+    const challenge = createChallengeToken(
+      PREVIOUS_SECRET,
+      buyer.publicKey(),
+      promptId,
+      BASE_TIME,
+      LONG_TTL_MS,
+      TEST_CHALLENGE_CONTEXT,
+    );
     const signedMessage = Buffer.from(
       buyer.sign(Buffer.from(challenge.challenge, "utf8")),
     ).toString("base64");
@@ -672,7 +731,14 @@ describe("unlock API challenge-token secret rotation grace period (#609)", () =>
     delete process.env.CHALLENGE_TOKEN_ROTATION_TIMESTAMP;
     process.env.CHALLENGE_TOKEN_GRACE_PERIOD_MS = "1000";
 
-    const challenge = createChallengeToken(PREVIOUS_SECRET, buyer.publicKey(), promptId, BASE_TIME, LONG_TTL_MS);
+    const challenge = createChallengeToken(
+      PREVIOUS_SECRET,
+      buyer.publicKey(),
+      promptId,
+      BASE_TIME,
+      LONG_TTL_MS,
+      TEST_CHALLENGE_CONTEXT,
+    );
     const signedMessage = Buffer.from(
       buyer.sign(Buffer.from(challenge.challenge, "utf8")),
     ).toString("base64");
@@ -688,5 +754,219 @@ describe("unlock API challenge-token secret rotation grace period (#609)", () =>
 
     expect(statusCode).toBe(400);
     expect(responseData.code).toBe(ErrorCode.TEMPORARY_FAILURE);
+  });
+});
+
+describe("unlock API listing snapshot binding (#698)", () => {
+  const CREATOR = "GCREATORACCOUNT1234567890ABCDEFGH1234567890ABCDEFGH1234567890";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    globalNonceLedger.clear();
+    clearIdempotencyCache();
+  });
+
+  const snapshot = {
+    promptId: "42",
+    owner: CREATOR,
+    priceStroops: "1234567",
+    asset: "ASSET-1",
+    version: "3",
+    expiresAt: "1700000000",
+  };
+
+  it("accepts a valid purchase when the current listing matches the signed snapshot", async () => {
+    const buyer = Keypair.random();
+    const promptId = "42";
+    process.env.CHALLENGE_TOKEN_SECRET = "snapshot-test-secret";
+    process.env.UNLOCK_PUBLIC_KEY = "d".repeat(32);
+    process.env.UNLOCK_PRIVATE_KEY = "e".repeat(32);
+
+    const signedHash = computeListingSnapshotHash(snapshot);
+    const challenge = createChallengeToken(
+      process.env.CHALLENGE_TOKEN_SECRET,
+      buyer.publicKey(),
+      promptId,
+      Date.now(),
+      5 * 60 * 1000,
+      { ...TEST_CHALLENGE_CONTEXT, listingSnapshotHash: signedHash },
+    );
+    const signedMessage = Buffer.from(
+      buyer.sign(Buffer.from(challenge.challenge, "utf8")),
+    ).toString("base64");
+
+    verifyEntitlementMock.mockResolvedValue({ hasAccess: true, ledgerSequence: 1, checkedAt: Date.now() });
+    hasAccessMock.mockResolvedValue(true);
+    getPromptMock.mockResolvedValue({
+      id: 42n,
+      creator: CREATOR,
+      title: "Test",
+      contentHash: CONTENT_HASH,
+      encryptedPrompt: "encrypted",
+      encryptionIv: "iv",
+      wrappedKey: "wrapped",
+      priceStroops: 1234567n,
+      asset: "ASSET-1",
+      revision: 3,
+      expiresAt: 1700000000,
+    });
+    unwrapPromptKeyMock.mockResolvedValue(new Uint8Array(32));
+    decryptPromptCiphertextMock.mockResolvedValue(PLAINTEXT);
+    hashPromptPlaintextMock.mockResolvedValue(CONTENT_HASH);
+
+    const { statusCode } = await invokeUnlock({
+      token: challenge.token,
+      promptId,
+      address: buyer.publicKey(),
+      signedMessage,
+    });
+
+    expect(statusCode).toBe(200);
+  });
+
+  it("rejects a stale listing when the current listing drifted from the signed snapshot", async () => {
+    const buyer = Keypair.random();
+    const promptId = "42";
+    process.env.CHALLENGE_TOKEN_SECRET = "snapshot-test-secret";
+    process.env.UNLOCK_PUBLIC_KEY = "d".repeat(32);
+    process.env.UNLOCK_PRIVATE_KEY = "e".repeat(32);
+
+    const signedHash = computeListingSnapshotHash(snapshot);
+    const challenge = createChallengeToken(
+      process.env.CHALLENGE_TOKEN_SECRET,
+      buyer.publicKey(),
+      promptId,
+      Date.now(),
+      5 * 60 * 1000,
+      { ...TEST_CHALLENGE_CONTEXT, listingSnapshotHash: signedHash },
+    );
+    const signedMessage = Buffer.from(
+      buyer.sign(Buffer.from(challenge.challenge, "utf8")),
+    ).toString("base64");
+
+    verifyEntitlementMock.mockResolvedValue({ hasAccess: true, ledgerSequence: 1, checkedAt: Date.now() });
+    hasAccessMock.mockResolvedValue(true);
+    // Current on-chain price no longer matches the snapshot the buyer signed.
+    getPromptMock.mockResolvedValue({
+      id: 42n,
+      creator: CREATOR,
+      title: "Test",
+      contentHash: CONTENT_HASH,
+      encryptedPrompt: "encrypted",
+      encryptionIv: "iv",
+      wrappedKey: "wrapped",
+      priceStroops: 9999999n,
+      asset: "ASSET-1",
+      revision: 3,
+      expiresAt: 1700000000,
+    });
+
+    const { statusCode, responseData } = await invokeUnlock({
+      token: challenge.token,
+      promptId,
+      address: buyer.publicKey(),
+      signedMessage,
+    });
+
+    expect(statusCode).toBe(409);
+    expect(responseData.code).toBe(ErrorCode.STALE_PROMPT_TERMS);
+    expect(String(responseData.error)).toContain("listing changed");
+  });
+
+  it("is backward compatible when a challenge carries no listing snapshot hash", async () => {
+    const { buyer, promptId, challenge, signedMessage } = await setupUnlockFixture();
+    const { statusCode } = await invokeUnlock({
+      token: challenge.token,
+      promptId,
+      address: buyer.publicKey(),
+      signedMessage,
+    });
+    expect(statusCode).toBe(200);
+  });
+});
+
+describe("unlock API disputed purchases (#755)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    clearIdempotencyCache();
+  });
+
+  it("opens a recoverable dispute when a paid unlock fails the integrity check", async () => {
+    const { buyer, promptId, challenge, signedMessage } = await setupUnlockFixture();
+    hashPromptPlaintextMock.mockResolvedValue("b".repeat(64));
+
+    const { statusCode } = await invokeUnlock({
+      token: challenge.token,
+      promptId,
+      address: buyer.publicKey(),
+      signedMessage,
+    });
+
+    expect(statusCode).toBe(500);
+    expect(recordUnlockFailureMock).toHaveBeenCalledWith({
+      promptId,
+      buyerWallet: buyer.publicKey(),
+      reason: "integrity_failure",
+      requestId: "test-request",
+    });
+    expect(recordUnlockSuccessMock).not.toHaveBeenCalled();
+  });
+
+  it("opens a dispute when delivery errors after the payment was confirmed (partial failure)", async () => {
+    const { buyer, promptId, challenge, signedMessage } = await setupUnlockFixture();
+    decryptPromptCiphertextMock.mockRejectedValue(new Error("IPFS gateway timeout"));
+
+    const { statusCode } = await invokeUnlock({
+      token: challenge.token,
+      promptId,
+      address: buyer.publicKey(),
+      signedMessage,
+    });
+
+    expect(statusCode).toBe(400);
+    expect(recordUnlockFailureMock).toHaveBeenCalledWith(
+      expect.objectContaining({ promptId, reason: "unlock_error" }),
+    );
+  });
+
+  it("does not open a dispute when the wallet never paid", async () => {
+    const { buyer, promptId, challenge, signedMessage } = await setupUnlockFixture();
+    verifyEntitlementMock.mockResolvedValue({
+      hasAccess: false,
+      ledgerSequence: 123456,
+      ledgerHash: "hash",
+      networkId: "testnet",
+      contractId: TEST_CONTRACT_ID,
+      checkedAt: Date.now(),
+    });
+
+    const { statusCode } = await invokeUnlock({
+      token: challenge.token,
+      promptId,
+      address: buyer.publicKey(),
+      signedMessage,
+    });
+
+    expect(statusCode).toBe(403);
+    expect(recordUnlockFailureMock).not.toHaveBeenCalled();
+  });
+
+  it("reports a successful unlock so an open dispute can close", async () => {
+    const { buyer, promptId, challenge, signedMessage } = await setupUnlockFixture();
+
+    const { statusCode } = await invokeUnlock({
+      token: challenge.token,
+      promptId,
+      address: buyer.publicKey(),
+      signedMessage,
+    });
+
+    expect(statusCode).toBe(200);
+    expect(recordUnlockSuccessMock).toHaveBeenCalledWith({
+      promptId,
+      buyerWallet: buyer.publicKey(),
+      requestId: "test-request",
+    });
+    expect(recordUnlockFailureMock).not.toHaveBeenCalled();
   });
 });

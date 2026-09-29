@@ -1,12 +1,16 @@
 use super::events::Events;
 use super::storage::{InstanceStorage, Storage};
 use super::types::{
-    AccessPass, AssetLiability, AssetSolvency, Bundle, CatalogPassPurchase, DataKey,
-    DisputeReason, DisputeStatus, Error, ListingConfig, ListingRevisionRecord, Prompt,
-    PromptHashTrait, PromptSaleStatus, PurchaseDispute, PurchaseEscrow, SettlementStatus,
-    SignedDiscountAuthorization, Split,
+    AccessPass, AssetLiability, AssetSolvency, Bundle, CatalogPassPurchase, DataKey, DisputeReason,
+    DisputeStatus, Error, IndexDriftReport, IndexRepairSummary, ListingConfig,
+    ListingRevisionRecord, Prompt, PromptHashTrait, PromptSaleStatus, PurchaseDispute,
+    PurchaseEscrow, PurchaseRoundingPlan, RevenueRoundingReport, RevenueRoundingShare,
+    RevenueShareKind, SettlementStatus, SignedDiscountAuthorization, Split,
 };
-use soroban_sdk::{contract, contractimpl, token, Address, Bytes, BytesN, Env, String, Vec};
+use soroban_sdk::xdr::ToXdr;
+use soroban_sdk::{
+    contract, contractimpl, token, Address, Bytes, BytesN, Env, IntoVal, String, Val, Vec,
+};
 use stellar_access::ownable::{self as ownable, Ownable};
 use stellar_macros::only_owner;
 
@@ -21,6 +25,8 @@ const MAX_ENCRYPTED_PROMPT_LEN: u32 = 4096;
 const MAX_WRAPPED_KEY_LEN: u32 = 256;
 const MAX_IMAGE_URL_LEN: u32 = 512;
 const MAX_IV_LEN: u32 = 64;
+const SECONDS_PER_DAY: u64 = 86400;
+const DEFAULT_EXPIRY_DAYS: u64 = 30;
 const LEASE_PRICE_BPS: u32 = 4_000;
 const MAX_ACCESS_EXPIRY: u64 = u64::MAX;
 const MAX_SPLITS: u32 = 10;
@@ -36,6 +42,86 @@ const MAX_BULK_PURCHASE_SIZE: u32 = 20;
 // pending escrow. After it elapses with no open dispute, settlement becomes
 // permissionless (#541).
 const DISPUTE_WINDOW_SECS: u64 = 3 * 24 * 60 * 60;
+const MAX_ROUNDING_SHARES: usize = (MAX_BUNDLE_PROMPTS * MAX_SPLITS + 3) as usize;
+
+fn settle_revenue_rounding(
+    env: &Env,
+    asset: &Address,
+    payment: i128,
+    contract: &Address,
+    plan: &PurchaseRoundingPlan,
+) -> Result<(), Error> {
+    if plan.shares.len() as usize > MAX_ROUNDING_SHARES {
+        return Err(Error::InvalidSplits);
+    }
+
+    let mut shares_bps = [0u32; MAX_ROUNDING_SHARES];
+    let mut previous_remainders = [0u32; MAX_ROUNDING_SHARES];
+    for index in 0..plan.shares.len() {
+        let share = plan.shares.get(index).unwrap();
+        shares_bps[index as usize] = share.bps;
+        previous_remainders[index as usize] = Storage::get_revenue_rounding_carry(
+            env,
+            asset,
+            &share.recipient,
+            share.kind,
+            share.source_id,
+        );
+    }
+
+    let report = Storage::get_revenue_rounding_report(env, asset);
+    let allocation = revenue_rounding::allocate_round(
+        payment,
+        &shares_bps,
+        &previous_remainders,
+        report.reserve_stroops,
+    )
+    .map_err(|error| match error {
+        revenue_rounding::RoundingError::SharesDoNotSumToDenominator => Error::InvalidSplits,
+        _ => Error::ArithmeticOverflow,
+    })?;
+
+    let asset_client = token::StellarAssetClient::new(env, asset);
+    for index in 0..plan.shares.len() {
+        let share = plan.shares.get(index).unwrap();
+        let amount = allocation.amounts[index as usize];
+        if amount > 0 {
+            asset_client.transfer(contract, &share.recipient, &amount);
+        }
+        Storage::save_revenue_rounding_carry(
+            env,
+            asset,
+            &share.recipient,
+            share.kind,
+            share.source_id,
+            allocation.remainders[index as usize],
+        );
+    }
+    Storage::update_revenue_rounding_report(
+        env,
+        asset,
+        allocation.rounding_numerator,
+        allocation.reserve_after,
+    )?;
+    Ok(())
+}
+
+/// Canonical listing snapshot hash over the fields a buyer signs: id, owner,
+/// price, asset, version (revision), and expiry. Mirrors the off-chain
+/// `computeListingSnapshotHash` so the same listing always hashes identically
+/// across environments, binding off-chain purchase authorizations to the exact
+/// on-chain listing state (#698).
+fn listing_snapshot_hash(env: &Env, prompt: &Prompt) -> BytesN<32> {
+    let mut buf: Vec<Val> = Vec::new(env);
+    buf.push_back((prompt.id as u128).into_val(env));
+    buf.push_back(prompt.creator.to_val());
+    buf.push_back(prompt.price_stroops.into_val(env));
+    buf.push_back(prompt.asset.to_val());
+    buf.push_back((prompt.revision as u128).into_val(env));
+    buf.push_back((prompt.expires_at as u128).into_val(env));
+    let raw = env.crypto().sha256(&buf.to_xdr(env));
+    BytesN::from_array(env, &raw.to_array())
+}
 
 #[contract]
 pub struct PromptHashContract;
@@ -71,8 +157,10 @@ impl PromptHashTrait for PromptHashContract {
         encryption_iv: String,
         wrapped_key: String,
         content_hash: BytesN<32>,
-        listing: ListingConfig,
-    ) -> Result<u64, Error> {
+        price_stroops: i128,
+        expires_at: Option<u64>,
+        max_supply: u64, // #119: 0 = unlimited
+    ) -> Result<u128, Error> {
         creator.require_auth();
         InstanceStorage::require_config_initialized(&env)?;
         ensure(!InstanceStorage::is_paused(&env), Error::ContractIsPaused)?;
@@ -118,11 +206,9 @@ impl PromptHashTrait for PromptHashContract {
             asset: listing.asset.clone(),
             status: PromptSaleStatus::Active,
             sales_count: 0,
-            max_supply: listing.max_supply,
-            expires_at: listing.expires_at,
-            splits: listing.splits,
-            revision: 0,
-            tags: listing.tags,
+            expires_at,
+            max_supply, // #119
+            max_supply: 0, // default unlimited; use set_prompt_max_supply to restrict
         };
 
         Storage::save_prompt(&env, &prompt)?;
@@ -150,6 +236,7 @@ impl PromptHashTrait for PromptHashContract {
 
         prompt.status = status.clone();
         Storage::update_prompt(&env, &prompt);
+        Storage::update_status_indexes(&env, &prompt);
         Events::emit_prompt_sale_status_updated(&env, prompt_id, status);
         Ok(())
     }
@@ -160,10 +247,16 @@ impl PromptHashTrait for PromptHashContract {
         admin: Address,
         prompt_id: u64,
         status: PromptSaleStatus,
+        reason: super::types::ModerationReason,
+        policy_reference: soroban_sdk::String,
+        reverses_timestamp: u64,
     ) -> Result<(), Error> {
         admin.require_auth();
         let owner = ownable::get_owner(&env).ok_or(Error::Unauthorized)?;
         ensure(owner == admin, Error::Unauthorized)?;
+
+        // Ensure structured evidence reference is provided
+        ensure(!policy_reference.is_empty(), Error::InvalidMetadata)?;
 
         let mut prompt = Storage::require_prompt(&env, prompt_id)?;
         ensure(
@@ -172,10 +265,49 @@ impl PromptHashTrait for PromptHashContract {
         )?;
         ensure(prompt.status != status, Error::InvalidStatusTransition)?;
 
+        // If this action reverses a prior moderation decision, verify the original action record exists
+        if reverses_timestamp != 0 {
+            let _orig = Storage::get_moderation_record(&env, prompt_id, reverses_timestamp)?;
+        }
+
+        let previous_state = prompt.status.clone();
+        let now = env.ledger().timestamp();
+
+        // Store moderation audit record with durable evidence trail and reversal link
+        let moderation_record = super::types::ModerationRecord {
+            prompt_id,
+            moderator: admin.clone(),
+            action: status.clone(),
+            previous_state: previous_state.clone(),
+            reason: reason.clone(),
+            policy_reference: policy_reference.clone(),
+            timestamp: now,
+            reverses_timestamp,
+        };
+        Storage::set_moderation_record(&env, &moderation_record);
+
         prompt.status = status.clone();
         Storage::update_prompt(&env, &prompt);
-        Events::emit_prompt_admin_moderated(&env, prompt_id, admin, status);
+        Storage::update_status_indexes(&env, &prompt);
+        Events::emit_prompt_admin_moderated(
+            &env,
+            prompt_id,
+            admin,
+            status,
+            previous_state,
+            reason,
+            policy_reference,
+            reverses_timestamp,
+        );
         Ok(())
+    }
+
+    fn get_moderation_record(
+        env: Env,
+        prompt_id: u64,
+        timestamp: u64,
+    ) -> Result<super::types::ModerationRecord, Error> {
+        Storage::get_moderation_record(&env, prompt_id, timestamp)
     }
 
     fn set_prompt_max_supply(
@@ -239,17 +371,18 @@ impl PromptHashTrait for PromptHashContract {
         )
     }
 
-    fn buy_prompt_with_auth(
-        env: Env,
-        buyer: Address,
-        prompt_id: u64,
-        referrer: Option<Address>,
-        payment_amount_stroops: i128,
-        authorization: SignedDiscountAuthorization,
-        creator_sig: BytesN<64>,
-    ) -> Result<(), Error> {
-        buyer.require_auth();
-        ensure(!InstanceStorage::is_paused(&env), Error::ContractIsPaused)?;
+        ensure!(prompt.active, Error::PromptInactive)?;
+        ensure!(prompt.creator != buyer, Error::CreatorCannotBuy)?;
+        ensure!(!Storage::has_purchase(&env, prompt_id, &buyer), Error::AlreadyPurchased)?;
+        if let Some(expiry) = prompt.expires_at {
+            ensure!(env.ledger().timestamp() < expiry, Error::PromptExpired)?;
+        }
+        ensure(prompt.active, Error::PromptInactive)?;
+        ensure(prompt.creator != buyer, Error::CreatorCannotBuy)?;
+        ensure(
+            !Storage::has_active_purchase(&env, prompt_id, &buyer, now),
+            Error::AlreadyPurchased,
+        )?;
 
         let prompt = Storage::require_prompt(&env, prompt_id)?;
         let now = env.ledger().sequence();
@@ -302,9 +435,8 @@ impl PromptHashTrait for PromptHashContract {
             Error::InvalidAuthorizationSignature,
         )?;
 
-        // 6. Consume the nonce atomically so it cannot be redeemed twice.
-        env.storage().persistent().remove(&registration_key);
-        let _ = creator_sig;
+        let fee_percentage = Storage::get_fee_percentage(&env);
+        ensure!(fee_percentage <= MAX_BPS, Error::InvalidFeePercentage)?;
 
         // 8. Execute buy with discount
         let discount_amount = prompt
@@ -401,7 +533,20 @@ impl PromptHashTrait for PromptHashContract {
             asset_client.transfer(&this_contract, &fee_wallet, &fee_amount);
         }
 
-        prompt.sales_count = reserved_sales_count;
+        prompt.sales_count = prompt
+            .sales_count
+            .checked_add(1)
+            .ok_or(Error::ArithmeticOverflow)?;
+        Storage::update_prompt(&env, &prompt);
+        Storage::grant_purchase(&env, prompt_id, &buyer);
+        Storage::clear_reentrancy_guard(&env);
+        Events::emit_prompt_purchased(
+            &env,
+            prompt_id,
+            buyer,
+            prompt.creator,
+            prompt.price_stroops,
+        );
         let expires_at = now
             .checked_add(lease_duration_secs)
             .ok_or(Error::ArithmeticOverflow)?;
@@ -623,63 +768,98 @@ impl PromptHashTrait for PromptHashContract {
 
         let fee_wallet = InstanceStorage::get_fee_wallet(&env).ok_or(Error::FeeWalletNotSet)?;
 
-        // Distribute fee to the fee wallet from the contract's held balance
-        if fee_amount > 0 {
-            asset_client.transfer(&this_contract, &fee_wallet, &fee_amount);
-        }
-
-        // Distribute collaborator splits from the contract's held balance
-        let mut split_total: i128 = 0;
+        // Snapshot all basis-point shares before settlement; their sum must
+        // leave a non-negative creator share and total exactly 10,000 bps.
+        let mut allocated_bps = fee_percentage;
         let mut payout_splits: Vec<super::types::PayoutSplit> = Vec::new(&env);
+        let mut rounding_shares: Vec<RevenueRoundingShare> = Vec::new(&env);
+        if fee_percentage > 0 {
+            rounding_shares.push_back(RevenueRoundingShare {
+                recipient: fee_wallet.clone(),
+                kind: RevenueShareKind::PlatformFee,
+                source_id: 0,
+                bps: fee_percentage,
+            });
+        }
         for index in 0..prompts.len() {
             let prompt = prompts.get(index).unwrap();
             if !Storage::has_active_purchase(&env, prompt.id, &buyer, now) {
                 for split_idx in 0..prompt.splits.len() {
                     let split = prompt.splits.get(split_idx).unwrap();
+                    allocated_bps = allocated_bps
+                        .checked_add(split.bps)
+                        .ok_or(Error::ArithmeticOverflow)?;
                     let split_amount = payment_amount_stroops
                         .checked_mul(split.bps as i128)
                         .ok_or(Error::ArithmeticOverflow)?
                         / MAX_BPS as i128;
-                    split_total = split_total
-                        .checked_add(split_amount)
-                        .ok_or(Error::ArithmeticOverflow)?;
                     if split_amount > 0 {
-                        asset_client.transfer(&this_contract, &split.recipient, &split_amount);
                         payout_splits.push_back(super::types::PayoutSplit {
                             recipient: split.recipient.clone(),
                             amount: split_amount,
+                        });
+                    }
+                    if split.bps > 0 {
+                        rounding_shares.push_back(RevenueRoundingShare {
+                            recipient: split.recipient,
+                            kind: RevenueShareKind::Collaborator,
+                            source_id: prompt.id,
+                            bps: split.bps,
                         });
                     }
                 }
             }
         }
 
-        // Creator receives the remainder after all deductions
+        ensure(allocated_bps <= MAX_BPS, Error::InvalidSplits)?;
+        let creator_bps = MAX_BPS - allocated_bps;
         let creator_amount = payment_amount_stroops
-            .checked_sub(fee_amount)
-            .ok_or(Error::ArithmeticOverflow)?
-            .checked_sub(split_total)
+            .checked_mul(creator_bps as i128)
             .ok_or(Error::ArithmeticOverflow)?;
-        ensure(creator_amount >= 0, Error::InvalidSplits)?;
-
-        if creator_amount > 0 {
-            asset_client.transfer(&this_contract, &bundle.creator, &creator_amount);
+        let creator_amount = creator_amount / MAX_BPS as i128;
+        if creator_bps > 0 {
+            rounding_shares.push_back(RevenueRoundingShare {
+                recipient: bundle.creator.clone(),
+                kind: RevenueShareKind::Creator,
+                source_id: 0,
+                bps: creator_bps,
+            });
         }
 
-        // Update prompt sales counts and grant access for newly purchased prompts
+        // Update prompt sales counts and grant access for newly purchased prompts.
+        //
+        // Split payment_amount_stroops evenly across the prompts that actually
+        // need a new purchase record.  Integer division would silently drop the
+        // remainder ("dust"), so we give any leftover stroops to the first
+        // prompt — the sum of all stored original_price values then equals the
+        // total payment exactly (#596).
+        let new_count = prompts
+            .iter()
+            .filter(|p| !Storage::has_active_purchase(&env, p.id, &buyer, now))
+            .count() as i128;
+        ensure(new_count > 0, Error::AlreadyPurchased)?;
+        let per_prompt = payment_amount_stroops
+            .checked_div(new_count)
+            .ok_or(Error::InvalidPaymentAmount)?;
+        let remainder = payment_amount_stroops
+            .checked_rem(new_count)
+            .ok_or(Error::InvalidPaymentAmount)?;
+        let mut first_new = true;
         for index in 0..prompts.len() {
             let prompt = prompts.get(index).unwrap();
             if !Storage::has_active_purchase(&env, prompt.id, &buyer, now) {
                 Storage::update_prompt(&env, &prompt);
-                Storage::grant_purchase(
-                    &env,
-                    &prompt,
-                    &buyer,
-                    payment_amount_stroops
-                        .checked_div(prompts.len() as i128)
-                        .ok_or(Error::InvalidPaymentAmount)?,
-                    MAX_ACCESS_EXPIRY,
-                );
+                // Give the dust remainder to the first new prompt so the
+                // recorded prices sum exactly to payment_amount_stroops.
+                let this_price = if first_new {
+                    first_new = false;
+                    per_prompt
+                        .checked_add(remainder)
+                        .ok_or(Error::ArithmeticOverflow)?
+                } else {
+                    per_prompt
+                };
+                Storage::grant_purchase(&env, &prompt, &buyer, this_price, MAX_ACCESS_EXPIRY);
             }
         }
 
@@ -690,7 +870,8 @@ impl PromptHashTrait for PromptHashContract {
         Storage::update_bundle(&env, &bundle);
 
         // Create escrow with payout plan for unified dispute/settlement (#564)
-        let fee_wallet = InstanceStorage::get_fee_wallet(&env).ok_or(Error::FeeWalletNotSet)?;
+        // Bundles now have the same Pending/dispute_deadline escrow lifecycle as individual
+        // purchases (#595), giving buyers the full dispute window before settlement.
         let payout_plan = super::types::PayoutPlan {
             creator: bundle.creator.clone(),
             fee_wallet: fee_wallet.clone(),
@@ -700,23 +881,39 @@ impl PromptHashTrait for PromptHashContract {
             splits: payout_splits,
             creator_amount,
         };
+        let dispute_deadline = now
+            .checked_add(DISPUTE_WINDOW_SECS)
+            .ok_or(Error::ArithmeticOverflow)?;
         let escrow = PurchaseEscrow {
             prompt_id: 0, // Bundles don't have a single prompt ID
             buyer: buyer.clone(),
             amount: payment_amount_stroops,
             asset: bundle.asset.clone(),
             referrer: None,
-            status: SettlementStatus::Settled,
+            status: SettlementStatus::Pending,
             created_at: now,
-            settled_at: now,
-            // Bundle funds settle immediately — there is no pending window (#541).
-            dispute_deadline: now,
+            settled_at: 0, // Not yet settled
+            dispute_deadline,
             creator_amount,
             fee_amount,
             referral_amount: 0,
             payout_plan,
         };
         Storage::save_purchase_escrow(&env, &escrow);
+        Storage::save_purchase_rounding_plan(
+            &env,
+            0,
+            &buyer,
+            now,
+            &PurchaseRoundingPlan {
+                shares: rounding_shares,
+            },
+        );
+        // Track the escrowed bundle funds as pending liability (#570)
+        Storage::add_pending_liability(&env, &bundle.asset, payment_amount_stroops)?;
+        // Store bundle prompt IDs and mapping for later refund processing (#595)
+        Storage::save_bundle_purchase_prompts(&env, &buyer, bundle_id, &bundle.prompt_ids);
+        Storage::save_bundle_escrow_id(&env, &buyer, now, bundle_id);
 
         InstanceStorage::clear_reentrancy_guard(&env);
 
@@ -865,19 +1062,13 @@ impl PromptHashTrait for PromptHashContract {
             .checked_mul(fee_percentage as i128)
             .ok_or(Error::ArithmeticOverflow)?
             / MAX_BPS as i128;
+        let creator_bps = MAX_BPS - fee_percentage;
         let creator_amount = payment_amount_stroops
-            .checked_sub(fee_amount)
+            .checked_mul(creator_bps as i128)
             .ok_or(Error::ArithmeticOverflow)?;
+        let creator_amount = creator_amount / MAX_BPS as i128;
 
         let fee_wallet = InstanceStorage::get_fee_wallet(&env).ok_or(Error::FeeWalletNotSet)?;
-
-        // Distribute from the contract's held balance
-        if fee_amount > 0 {
-            asset_client.transfer(&this_contract, &fee_wallet, &fee_amount);
-        }
-        if creator_amount > 0 {
-            asset_client.transfer(&this_contract, &access_pass.creator, &creator_amount);
-        }
 
         // Renewing before the current grant expires extends it forward from
         // the existing expiry rather than from `now`, so the buyer never
@@ -916,11 +1107,28 @@ impl PromptHashTrait for PromptHashContract {
             splits: Vec::new(&env),
             creator_amount,
         };
+        let mut rounding_shares = Vec::new(&env);
+        if fee_percentage > 0 {
+            rounding_shares.push_back(RevenueRoundingShare {
+                recipient: fee_wallet,
+                kind: RevenueShareKind::PlatformFee,
+                source_id: 0,
+                bps: fee_percentage,
+            });
+        }
+        if creator_bps > 0 {
+            rounding_shares.push_back(RevenueRoundingShare {
+                recipient: access_pass.creator.clone(),
+                kind: RevenueShareKind::Creator,
+                source_id: 0,
+                bps: creator_bps,
+            });
+        }
         let dispute_deadline = now
             .checked_add(DISPUTE_WINDOW_SECS)
             .ok_or(Error::ArithmeticOverflow)?;
         let escrow = PurchaseEscrow {
-            prompt_id: pass_id, // Use pass_id as the unique identifier within AccessPassEscrow
+            prompt_id: pass_id as u64, // Use pass_id as the unique identifier within AccessPassEscrow
             buyer: buyer.clone(),
             amount: payment_amount_stroops,
             asset: access_pass.asset.clone(),
@@ -935,6 +1143,15 @@ impl PromptHashTrait for PromptHashContract {
             payout_plan,
         };
         Storage::save_access_pass_escrow(&env, pass_id, &buyer, &escrow);
+        Storage::save_access_pass_rounding_plan(
+            &env,
+            pass_id,
+            &buyer,
+            now,
+            &PurchaseRoundingPlan {
+                shares: rounding_shares,
+            },
+        );
         // Track the escrowed funds as pending liability (#570)
         Storage::add_pending_liability(&env, &access_pass.asset, payment_amount_stroops)?;
 
@@ -1024,14 +1241,6 @@ impl PromptHashTrait for PromptHashContract {
         Ok(())
     }
 
-    /// Guarded against reentrancy during royalty and seller payment transfers.
-    /// #564: Added explicit guard coverage audit.
-    fn _audit_transfer_license_guard() {
-        // transfer_license transfers funds to two addresses (creator + seller).
-        // GUARDED: set_reentrancy_guard at line ~967, clear at ~991.
-        // Rationale: transfer_from can trigger fallback/callback in malicious SAC.
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn revise_listing(
         env: Env,
@@ -1066,8 +1275,9 @@ impl PromptHashTrait for PromptHashContract {
         };
         Storage::save_listing_revision(&env, &snapshot);
 
+        let old_category = prompt.category.clone();
         prompt.title = title;
-        prompt.category = category;
+        prompt.category = category.clone();
         prompt.preview_text = preview_text;
         prompt.image_url = image_url;
         prompt.price_stroops = price_stroops;
@@ -1077,6 +1287,10 @@ impl PromptHashTrait for PromptHashContract {
             .ok_or(Error::ArithmeticOverflow)?;
 
         Storage::update_prompt(&env, &prompt);
+        if old_category != category {
+            Storage::remove_from_category_index(&env, &old_category, prompt_id);
+            Storage::update_category_index(&env, &prompt);
+        }
         Events::emit_listing_revised(&env, prompt_id, prompt.revision);
         Ok(prompt.revision)
     }
@@ -1121,6 +1335,20 @@ impl PromptHashTrait for PromptHashContract {
 
     fn get_prompt(env: Env, prompt_id: u64) -> Result<Prompt, Error> {
         Storage::require_prompt(&env, prompt_id)
+    }
+
+    fn listing_snapshot_hash(env: Env, prompt_id: u64) -> Result<BytesN<32>, Error> {
+        let prompt = Storage::require_prompt(&env, prompt_id)?;
+        Ok(listing_snapshot_hash(&env, &prompt))
+    }
+
+    fn verify_listing_snapshot(
+        env: Env,
+        prompt_id: u64,
+        expected: BytesN<32>,
+    ) -> Result<bool, Error> {
+        let current = Self::listing_snapshot_hash(env, prompt_id)?;
+        Ok(current == expected)
     }
 
     fn get_all_prompts(env: Env) -> Result<Vec<Prompt>, Error> {
@@ -1252,6 +1480,112 @@ impl PromptHashTrait for PromptHashContract {
         Ok((prompts, next_cursor))
     }
 
+    fn get_prompts_by_creator_paginated(
+        env: Env,
+        creator: Address,
+        cursor: Option<String>,
+        limit: u64,
+    ) -> Result<(Vec<Prompt>, Option<String>), Error> {
+        use crate::pagination::{decode_cursor, encode_cursor, IndexType};
+
+        let cursor_id = if let Some(c) = cursor {
+            let parsed = decode_cursor(&env, &c)?;
+            Some(parsed.last_id)
+        } else {
+            None
+        };
+
+        let key = crate::types::DataKey::CreatorPrompts(creator.clone());
+        let prompts = Storage::get_prompts_paginated(&env, &key, cursor_id, limit);
+
+        let next_cursor = if !prompts.is_empty() {
+            let last_id = prompts.last().ok_or(Error::PromptNotFound)?.id;
+            Some(encode_cursor(&env, last_id, IndexType::Creator))
+        } else {
+            None
+        };
+
+        Ok((prompts, next_cursor))
+    }
+
+    fn get_prompts_by_buyer_paginated(
+        env: Env,
+        buyer: Address,
+        cursor: Option<String>,
+        limit: u64,
+    ) -> Result<(Vec<Prompt>, Option<String>), Error> {
+        use crate::pagination::{decode_cursor, encode_cursor, IndexType};
+
+        let cursor_id = if let Some(c) = cursor {
+            let parsed = decode_cursor(&env, &c)?;
+            Some(parsed.last_id)
+        } else {
+            None
+        };
+
+        let key = crate::types::DataKey::BuyerPrompts(buyer.clone());
+        let prompts = Storage::get_prompts_paginated(&env, &key, cursor_id, limit);
+
+        let next_cursor = if !prompts.is_empty() {
+            let last_id = prompts.last().ok_or(Error::PromptNotFound)?.id;
+            Some(encode_cursor(&env, last_id, IndexType::Buyer))
+        } else {
+            None
+        };
+
+        Ok((prompts, next_cursor))
+    }
+
+    // ====== SECONDARY INDEX VERIFICATION AND REPAIR (#652) ======
+
+    fn verify_catalog_indexes(
+        env: Env,
+        start_id: u64,
+        batch_size: u64,
+    ) -> Result<IndexDriftReport, Error> {
+        ensure(!InstanceStorage::is_paused(&env), Error::ContractIsPaused)?;
+        Ok(Storage::verify_catalog_indexes(&env, start_id, batch_size))
+    }
+
+    #[only_owner]
+    fn repair_catalog_indexes(
+        env: Env,
+        admin: Address,
+        start_id: u64,
+        batch_size: u64,
+        dry_run: bool,
+    ) -> Result<IndexRepairSummary, Error> {
+        admin.require_auth();
+        let owner = ownable::get_owner(&env).ok_or(Error::Unauthorized)?;
+        ensure(owner == admin, Error::Unauthorized)?;
+        ensure(!InstanceStorage::is_paused(&env), Error::ContractIsPaused)?;
+
+        let summary = Storage::repair_catalog_indexes(&env, start_id, batch_size, dry_run);
+        Events::emit_catalog_indexes_repaired(
+            &env,
+            admin,
+            summary.start_id,
+            summary.end_id,
+            summary.repairs_applied,
+            summary.is_dry_run,
+        );
+        Ok(summary)
+    }
+
+    // ====== ACCOUNTING INVARIANT RECONCILIATION (#653) ======
+
+    #[only_owner]
+    fn reconcile_sales_counter(env: Env, admin: Address, prompt_id: u64) -> Result<u64, Error> {
+        admin.require_auth();
+        let owner = ownable::get_owner(&env).ok_or(Error::Unauthorized)?;
+        ensure(owner == admin, Error::Unauthorized)?;
+        ensure(!InstanceStorage::is_paused(&env), Error::ContractIsPaused)?;
+
+        let count = Storage::reconcile_sales_counter(&env, prompt_id)?;
+        Events::emit_sales_counter_reconciled(&env, prompt_id, count, count);
+        Ok(count)
+    }
+
     // ====== TTL MAINTENANCE (OPERATOR UTILITIES) ======
 
     fn renew_critical_keys(env: Env, cursor: Option<u64>) -> Result<(u32, Option<u64>), Error> {
@@ -1264,6 +1598,28 @@ impl PromptHashTrait for PromptHashContract {
         Ok(Storage::compute_expiry_risks(&env))
     }
 
+    fn get_revenue_rounding_report(env: Env, asset: Address) -> RevenueRoundingReport {
+        Storage::get_revenue_rounding_report(&env, &asset)
+    }
+
+    fn get_asset_liability(env: Env, asset: Address) -> AssetLiability {
+        Storage::get_asset_liability(&env, &asset)
+    }
+
+    fn get_asset_solvency(env: Env, asset: Address) -> AssetSolvency {
+        compute_asset_solvency(&env, &asset)
+    }
+
+    fn get_revenue_rounding_remainder(
+        env: Env,
+        asset: Address,
+        recipient: Address,
+        kind: RevenueShareKind,
+        source_id: u64,
+    ) -> u32 {
+        Storage::get_revenue_rounding_carry(&env, &asset, &recipient, kind, source_id)
+    }
+
     fn open_dispute(
         env: Env,
         buyer: Address,
@@ -1273,11 +1629,17 @@ impl PromptHashTrait for PromptHashContract {
         buyer.require_auth();
         ensure(!InstanceStorage::is_paused(&env), Error::ContractIsPaused)?;
         let now = env.ledger().timestamp();
-        Storage::require_purchase(&env, prompt_id, &buyer)?;
-        // Purchases with a pending escrow (direct/bulk buys) may only be
+
+        // Bundle disputes (#595) have prompt_id == 0 and no individual purchase record
+        let is_bundle_dispute = prompt_id == 0 && Storage::get_prompt(&env, 0).is_none();
+        if !is_bundle_dispute {
+            Storage::require_purchase(&env, prompt_id, &buyer)?;
+        }
+
+        // Purchases with a pending escrow (direct/bulk buys, now bundles #595) may only be
         // disputed within the purchase-relative window; once it closes the
         // escrow is eligible for permissionless settlement (#541). Purchases
-        // without a pending escrow (leases, bundles, passes) are unaffected.
+        // without a pending escrow (leases, access passes) are unaffected.
         let mut escrow_liability_move: Option<(Address, i128)> = None;
         if let Some(escrow) = Storage::get_purchase_escrow(&env, prompt_id, &buyer) {
             if escrow.status == SettlementStatus::Pending {
@@ -1287,6 +1649,9 @@ impl PromptHashTrait for PromptHashContract {
                 // Already settled or refunded — nothing left to dispute.
                 return Err(Error::DisputeWindowClosed);
             }
+        } else if !is_bundle_dispute {
+            // Non-bundle purchases without an escrow shouldn't be disputed
+            return Err(Error::DisputeWindowClosed);
         }
         if let Some(dispute) = Storage::get_dispute(&env, prompt_id, &buyer) {
             ensure(
@@ -1332,44 +1697,112 @@ impl PromptHashTrait for PromptHashContract {
 
         InstanceStorage::set_reentrancy_guard(&env)?;
 
-        let mut prompt = Storage::require_prompt(&env, prompt_id)?;
-        let purchase = Storage::require_purchase(&env, prompt_id, &buyer)?;
+        // Bundle disputes (#595) have prompt_id == 0 and require special refund handling
+        let is_bundle_dispute = prompt_id == 0 && Storage::get_prompt(&env, 0).is_none();
         let mut dispute = Storage::require_dispute(&env, prompt_id, &buyer)?;
         ensure(
             dispute.status == DisputeStatus::Open,
             Error::DisputeResolved,
         )?;
         dispute.resolved_at = env.ledger().timestamp();
+
         if refund {
-            let asset_client = token::StellarAssetClient::new(&env, &prompt.asset);
-            // Refund from the contract's escrowed balance (#454).  The
-            // funds were routed to the contract during purchase so that
-            // a refund is always possible without additional auth.
-            asset_client.transfer(
-                &env.current_contract_address(),
-                &buyer,
-                &purchase.original_price,
-            );
+            if is_bundle_dispute {
+                // Handle bundle dispute refund (#595)
+                if let Some(escrow) = Storage::get_purchase_escrow(&env, prompt_id, &buyer) {
+                    let asset_client = token::StellarAssetClient::new(&env, &escrow.asset);
+                    // Refund the full bundle amount to the buyer
+                    asset_client.transfer(&env.current_contract_address(), &buyer, &escrow.amount);
 
-            // Mark the purchase as revoked so the buyer can no longer claim access.
-            Storage::remove_purchase(&env, prompt_id, &buyer);
-            Storage::remove_prompt_from_buyer(&env, &buyer, prompt_id);
-            dispute.status = DisputeStatus::Refunded;
+                    // Look up the bundle ID to access its prompts
+                    if let Some(bundle_id) =
+                        Storage::get_bundle_escrow_id(&env, &buyer, escrow.created_at)
+                    {
+                        if let Some(bundle_prompts) =
+                            Storage::get_bundle_purchase_prompts(&env, &buyer, bundle_id)
+                        {
+                            // Revoke access and release supply for each prompt in the bundle
+                            for index in 0..bundle_prompts.len() {
+                                let prompt_in_bundle = bundle_prompts.get(index).unwrap();
+                                Storage::remove_purchase(&env, prompt_in_bundle, &buyer);
+                                Storage::remove_prompt_from_buyer(&env, &buyer, prompt_in_bundle);
 
-            // Release the reserved supply unit back to the pool so another
-            // buyer can acquire it (#538).
-            prompt.sales_count = prompt.sales_count.saturating_sub(1);
-            Storage::update_prompt(&env, &prompt);
+                                if let Some(mut prompt) =
+                                    Storage::get_prompt(&env, prompt_in_bundle)
+                                {
+                                    prompt.sales_count = prompt
+                                        .sales_count
+                                        .checked_sub(1)
+                                        .ok_or(Error::ArithmeticOverflow)?;
+                                    Storage::update_prompt(&env, &prompt);
+                                }
+                            }
+                        }
+                    }
 
-            // Update the escrow record so the settlement admin knows
-            // the funds were already returned to the buyer.
-            if let Some(mut escrow) = Storage::get_purchase_escrow(&env, prompt_id, &buyer) {
-                // The disputed amount was just paid out to the buyer — it's
-                // no longer anyone's liability (#570).
-                Storage::remove_disputed_liability(&env, &escrow.asset, escrow.amount)?;
-                escrow.status = SettlementStatus::Refunded;
-                escrow.settled_at = env.ledger().timestamp();
-                Storage::save_purchase_escrow(&env, &escrow);
+                    // Also remove the purchase record for prompt_id == 0
+                    Storage::remove_purchase(&env, prompt_id, &buyer);
+                    dispute.status = DisputeStatus::Refunded;
+
+                    // Update the escrow record
+                    let mut escrow_updated = escrow;
+                    Storage::remove_disputed_liability(
+                        &env,
+                        &escrow_updated.asset,
+                        escrow_updated.amount,
+                    )?;
+                    Storage::remove_purchase_rounding_plan(
+                        &env,
+                        prompt_id,
+                        &buyer,
+                        escrow_updated.created_at,
+                    );
+                    escrow_updated.status = SettlementStatus::Refunded;
+                    escrow_updated.settled_at = env.ledger().timestamp();
+                    Storage::save_purchase_escrow(&env, &escrow_updated);
+                }
+            } else {
+                // Handle single prompt dispute refund
+                let mut prompt = Storage::require_prompt(&env, prompt_id)?;
+                let purchase = Storage::require_purchase(&env, prompt_id, &buyer)?;
+                let asset_client = token::StellarAssetClient::new(&env, &prompt.asset);
+                // Refund from the contract's escrowed balance (#454).  The
+                // funds were routed to the contract during purchase so that
+                // a refund is always possible without additional auth.
+                asset_client.transfer(
+                    &env.current_contract_address(),
+                    &buyer,
+                    &purchase.original_price,
+                );
+
+                // Mark the purchase as revoked so the buyer can no longer claim access.
+                Storage::remove_purchase(&env, prompt_id, &buyer);
+                Storage::remove_prompt_from_buyer(&env, &buyer, prompt_id);
+                dispute.status = DisputeStatus::Refunded;
+
+                // Release the reserved supply unit back to the pool so another
+                // buyer may purchase it (#541).
+                ensure(prompt.sales_count > 0, Error::ArithmeticOverflow)?;
+                prompt.sales_count = prompt
+                    .sales_count
+                    .checked_sub(1)
+                    .ok_or(Error::ArithmeticOverflow)?;
+                Storage::update_prompt(&env, &prompt);
+
+                // If this purchase had an escrow, transition it to `Refunded`
+                // and clear the tracked disputed liability (#541, #570).
+                if let Some(mut escrow) = Storage::get_purchase_escrow(&env, prompt_id, &buyer) {
+                    Storage::remove_disputed_liability(&env, &escrow.asset, escrow.amount)?;
+                    Storage::remove_purchase_rounding_plan(
+                        &env,
+                        prompt_id,
+                        &buyer,
+                        escrow.created_at,
+                    );
+                    escrow.status = SettlementStatus::Refunded;
+                    escrow.settled_at = env.ledger().timestamp();
+                    Storage::save_purchase_escrow(&env, &escrow);
+                }
             }
         } else {
             dispute.status = DisputeStatus::Rejected;
@@ -1384,6 +1817,7 @@ impl PromptHashTrait for PromptHashContract {
         }
         Storage::save_dispute(&env, &dispute);
         InstanceStorage::clear_reentrancy_guard(&env);
+
         Events::emit_dispute_resolved(&env, prompt_id, buyer, refund);
         Ok(())
     }
@@ -1410,7 +1844,10 @@ impl PromptHashTrait for PromptHashContract {
         InstanceStorage::set_reentrancy_guard(&env)?;
 
         let owner = ownable::get_owner(&env).ok_or(Error::Unauthorized)?;
-        let prompt = Storage::require_prompt(&env, prompt_id)?;
+
+        // Bundle settlements (#595) have prompt_id == 0 and cannot use creator auth
+        let is_bundle_settle = prompt_id == 0 && Storage::get_prompt(&env, 0).is_none();
+        let prompt_option = Storage::get_prompt(&env, prompt_id);
 
         let mut escrow = Storage::require_purchase_escrow(&env, prompt_id, &buyer)?;
         ensure(
@@ -1428,7 +1865,10 @@ impl PromptHashTrait for PromptHashContract {
         }
 
         let now = env.ledger().timestamp();
-        let is_privileged = caller == owner || caller == prompt.creator;
+        let is_privileged = caller == owner
+            || (!is_bundle_settle
+                && prompt_option.is_some()
+                && caller == prompt_option.unwrap().creator);
         if !is_privileged {
             // Permissionless fallback: once the dispute window has closed
             // with no open dispute, anyone may finalize the escrow — this
@@ -1446,29 +1886,44 @@ impl PromptHashTrait for PromptHashContract {
         // Use the snapshotted payout plan, not the current listing state (#562).
         let plan = &escrow.payout_plan;
 
-        // Distribute fee to the snapshotted fee wallet
-        if plan.fee_amount > 0 {
-            asset_client.transfer(&this_contract, &plan.fee_wallet, &plan.fee_amount);
-        }
-
-        // Distribute referral to the snapshotted referrer
-        if let Some(ref r) = plan.referrer {
-            if plan.referral_amount > 0 {
-                asset_client.transfer(&this_contract, r, &plan.referral_amount);
+        if let Some(rounding_plan) = Storage::get_purchase_rounding_plan(
+            &env,
+            prompt_id,
+            &buyer,
+            escrow.created_at,
+        ) {
+            settle_revenue_rounding(
+                &env,
+                &escrow.asset,
+                escrow.amount,
+                &this_contract,
+                &rounding_plan,
+            )?;
+            Storage::remove_purchase_rounding_plan(
+                &env,
+                prompt_id,
+                &buyer,
+                escrow.created_at,
+            );
+        } else {
+            // Legacy escrows predate rounding plans and retain their saved payouts.
+            if plan.fee_amount > 0 {
+                asset_client.transfer(&this_contract, &plan.fee_wallet, &plan.fee_amount);
             }
-        }
-
-        // Distribute collaborator splits from the snapshotted amounts
-        for i in 0..plan.splits.len() {
-            let split = plan.splits.get(i).unwrap();
-            if split.amount > 0 {
-                asset_client.transfer(&this_contract, &split.recipient, &split.amount);
+            if let Some(ref r) = plan.referrer {
+                if plan.referral_amount > 0 {
+                    asset_client.transfer(&this_contract, r, &plan.referral_amount);
+                }
             }
-        }
-
-        // Transfer the creator's escrowed share to the snapshotted creator
-        if plan.creator_amount > 0 {
-            asset_client.transfer(&this_contract, &plan.creator, &plan.creator_amount);
+            for i in 0..plan.splits.len() {
+                let split = plan.splits.get(i).unwrap();
+                if split.amount > 0 {
+                    asset_client.transfer(&this_contract, &split.recipient, &split.amount);
+                }
+            }
+            if plan.creator_amount > 0 {
+                asset_client.transfer(&this_contract, &plan.creator, &plan.creator_amount);
+            }
         }
 
         // The escrow guards above guarantee this amount was still in the
@@ -1484,7 +1939,7 @@ impl PromptHashTrait for PromptHashContract {
             &env,
             prompt_id,
             buyer,
-            prompt.creator,
+            plan.creator.clone(),
             escrow.amount,
             escrow.referrer,
         );
@@ -1536,7 +1991,7 @@ impl PromptHashTrait for PromptHashContract {
         Storage::move_pending_to_disputed(&env, &escrow.asset, escrow.amount)?;
 
         let dispute = PurchaseDispute {
-            prompt_id: pass_id,
+            prompt_id: pass_id as u64,
             buyer: buyer.clone(),
             reason,
             opened_at: now,
@@ -1544,7 +1999,7 @@ impl PromptHashTrait for PromptHashContract {
             status: DisputeStatus::Open,
         };
         Storage::save_access_pass_dispute(&env, pass_id, &buyer, &dispute);
-        Events::emit_dispute_opened(&env, pass_id, buyer);
+        Events::emit_dispute_opened(&env, pass_id as u64, buyer);
         Ok(())
     }
 
@@ -1577,24 +2032,27 @@ impl PromptHashTrait for PromptHashContract {
         if refund {
             // Refund to the buyer
             let asset_client = token::StellarAssetClient::new(&env, &escrow.asset);
-            asset_client.transfer(
-                &env.current_contract_address(),
-                &buyer,
-                &escrow.amount,
-            );
+            asset_client.transfer(&env.current_contract_address(), &buyer, &escrow.amount);
 
             dispute.status = DisputeStatus::Refunded;
 
             // Remove the disputed liability since it's now paid out
             Storage::remove_disputed_liability(&env, &escrow.asset, escrow.amount)?;
+            Storage::remove_access_pass_rounding_plan(
+                &env,
+                pass_id,
+                &buyer,
+                escrow.created_at,
+            );
 
             // Revoke the catalog pass grant so buyer can't use it anymore
-            Storage::get_catalog_pass_purchase(&env, &escrow.payout_plan.creator, &buyer)
-                .map(|_| {
-                    // Clear the catalog pass by removing it
-                    let key = DataKey::CatalogPass(escrow.payout_plan.creator.clone(), buyer.clone());
-                    env.storage().persistent().remove(&key);
-                });
+            if Storage::get_catalog_pass_purchase(&env, &escrow.payout_plan.creator, &buyer)
+                .is_some()
+            {
+                // Clear the catalog pass by removing it
+                let key = DataKey::CatalogPass(escrow.payout_plan.creator.clone(), buyer.clone());
+                env.storage().persistent().remove(&key);
+            }
 
             // Update escrow to Refunded
             let mut updated_escrow = escrow.clone();
@@ -1609,7 +2067,7 @@ impl PromptHashTrait for PromptHashContract {
 
         Storage::save_access_pass_dispute(&env, pass_id, &buyer, &dispute);
         InstanceStorage::clear_reentrancy_guard(&env);
-        Events::emit_dispute_resolved(&env, pass_id, buyer, refund);
+        Events::emit_dispute_resolved(&env, pass_id as u64, buyer, refund);
         Ok(())
     }
 
@@ -1658,13 +2116,30 @@ impl PromptHashTrait for PromptHashContract {
         let asset_client = token::StellarAssetClient::new(&env, &escrow.asset);
         let plan = &escrow.payout_plan;
 
-        // Distribute funds according to payout plan
-        if plan.fee_amount > 0 {
-            asset_client.transfer(&this_contract, &plan.fee_wallet, &plan.fee_amount);
-        }
-
-        if plan.creator_amount > 0 {
-            asset_client.transfer(&this_contract, &plan.creator, &plan.creator_amount);
+        if let Some(rounding_plan) =
+            Storage::get_access_pass_rounding_plan(&env, pass_id, &buyer, escrow.created_at)
+        {
+            settle_revenue_rounding(
+                &env,
+                &escrow.asset,
+                escrow.amount,
+                &this_contract,
+                &rounding_plan,
+            )?;
+            Storage::remove_access_pass_rounding_plan(
+                &env,
+                pass_id,
+                &buyer,
+                escrow.created_at,
+            );
+        } else {
+            // Legacy escrows predate rounding plans and retain their saved payouts.
+            if plan.fee_amount > 0 {
+                asset_client.transfer(&this_contract, &plan.fee_wallet, &plan.fee_amount);
+            }
+            if plan.creator_amount > 0 {
+                asset_client.transfer(&this_contract, &plan.creator, &plan.creator_amount);
+            }
         }
 
         // Remove from pending liability since it's now been paid out
@@ -1677,7 +2152,7 @@ impl PromptHashTrait for PromptHashContract {
 
         Events::emit_prompt_purchased(
             &env,
-            pass_id,
+            pass_id as u64,
             buyer,
             plan.creator.clone(),
             escrow.amount,
@@ -1928,71 +2403,81 @@ impl PromptHashTrait for PromptHashContract {
         Ok(())
     }
 
-    #[only_owner]
-    fn extend_all_ttl(env: Env) -> Result<(), Error> {
-        Storage::extend_all_ttl(&env);
-        Ok(())
-    }
+fn extend_listing(
+    env: Env,
+    creator: Address,
+    prompt_id: u128,
+    extension_days: u64,
+    fee_percentage_bps: Option<u32>,
+) -> Result<(), Error> {
+    creator.require_auth();
+    let mut prompt = Storage::require_prompt(&env, prompt_id)?;
+    ensure!(prompt.creator == creator, Error::Unauthorized)?;
 
-    fn get_asset_liability(env: Env, asset: Address) -> AssetLiability {
-        Storage::get_asset_liability(&env, &asset)
-    }
+    ensure!(extension_days > 0, Error::InvalidExtensionDuration)?;
 
-    fn get_asset_solvency(env: Env, asset: Address) -> AssetSolvency {
-        compute_asset_solvency(&env, &asset)
-    }
+    let extension_seconds = extension_days
+        .checked_mul(SECONDS_PER_DAY)
+        .ok_or(Error::ArithmeticOverflow)?;
 
-    /// Permissionless invariant check: compares tracked liability against the
-    /// contract's actual SAC balance for `asset` and pauses the contract if
-    /// the balance no longer covers what's owed (#570). Intended to be
-    /// callable by an off-chain operational monitor on a schedule, not just
-    /// the owner — catching drift early matters more than gating who can look.
-    fn check_asset_solvency(env: Env, asset: Address) -> Result<AssetSolvency, Error> {
-        let solvency = compute_asset_solvency(&env, &asset);
-        if solvency.surplus < 0 {
-            InstanceStorage::set_pause_status(&env, true);
-            Events::emit_contract_paused_state_changed(&env, true);
-            Events::emit_solvency_violation_detected(
-                &env,
-                asset,
-                solvency.tracked_liability,
-                solvency.actual_balance,
-            );
+    let now = env.ledger().timestamp();
+    let new_expiry = if let Some(current_expiry) = prompt.expires_at {
+        if now >= current_expiry {
+            now.checked_add(extension_seconds).ok_or(Error::ArithmeticOverflow)?
+        } else {
+            current_expiry.checked_add(extension_seconds).ok_or(Error::ArithmeticOverflow)?
         }
-        Ok(solvency)
+    } else {
+        now.checked_add(extension_seconds).ok_or(Error::ArithmeticOverflow)?
+    };
+
+    let mut fee_paid = 0i128;
+    if let Some(fee_bps) = fee_percentage_bps {
+        ensure!(fee_bps <= MAX_BPS, Error::InvalidFeePercentage)?;
+        let fee = prompt
+            .price_stroops
+            .checked_mul(fee_bps as i128)
+            .ok_or(Error::ArithmeticOverflow)?
+            / MAX_BPS as i128;
+        if fee > 0 {
+            let fee_wallet = Storage::get_fee_wallet(&env).ok_or(Error::FeeWalletNotSet)?;
+            let xlm = Storage::get_stellar_asset_contract(&env)?;
+            let this_contract = env.current_contract_address();
+            xlm.transfer_from(&this_contract, &creator, &fee_wallet, &fee);
+            fee_paid = fee;
+        }
     }
 
-    /// One-time backfill for a deployment upgrading into this feature: adds a
-    /// single pre-existing Pending/Disputed escrow's amount into the
-    /// per-asset liability ledger. A no-op (Ok) if this exact escrow was
-    /// already migrated, so it is safe to retry (#570).
-    #[only_owner]
-    fn migrate_asset_liability(
-        env: Env,
-        admin: Address,
-        prompt_id: u64,
-        buyer: Address,
-    ) -> Result<(), Error> {
-        admin.require_auth();
-        let owner = ownable::get_owner(&env).ok_or(Error::Unauthorized)?;
-        ensure(owner == admin, Error::Unauthorized)?;
+    prompt.expires_at = Some(new_expiry);
+    Storage::update_prompt(&env, &prompt);
+    Events::emit_listing_extended(&env, prompt_id, creator, Some(new_expiry), extension_days, fee_paid);
+    Ok(())
+}
+        } else {
+            // No previous expiry; set from now
+            now.checked_add(extension_seconds).ok_or(Error::ArithmeticOverflow)?
+        };
 
-        if Storage::is_escrow_liability_migrated(&env, prompt_id, &buyer) {
-            return Ok(());
-        }
-
-        let escrow = Storage::require_purchase_escrow(&env, prompt_id, &buyer)?;
-        if escrow.status == SettlementStatus::Pending {
-            let dispute_open = Storage::get_dispute(&env, prompt_id, &buyer)
-                .map(|d| d.status == DisputeStatus::Open)
-                .unwrap_or(false);
-            if dispute_open {
-                Storage::add_disputed_liability(&env, &escrow.asset, escrow.amount)?;
-            } else {
-                Storage::add_pending_liability(&env, &escrow.asset, escrow.amount)?;
+        let mut fee_paid = 0i128;
+        if let Some(fee_bps) = fee_percentage_bps {
+            ensure!(fee_bps <= MAX_BPS, Error::InvalidFeePercentage)?;
+            let fee = prompt
+                .price_stroops
+                .checked_mul(fee_bps as i128)
+                .ok_or(Error::ArithmeticOverflow)?
+                / MAX_BPS as i128;
+            if fee > 0 {
+                let fee_wallet = Storage::get_fee_wallet(&env).ok_or(Error::FeeWalletNotSet)?;
+                let xlm = Storage::get_stellar_asset_contract(&env)?;
+                let this_contract = env.current_contract_address();
+                xlm.transfer_from(&this_contract, &creator, &fee_wallet, &fee)?;
+                fee_paid = fee;
             }
         }
-        Storage::mark_escrow_liability_migrated(&env, prompt_id, &buyer);
+
+        prompt.expires_at = Some(new_expiry);
+        Storage::update_prompt(&env, &prompt);
+        Events::emit_listing_extended(&env, prompt_id, creator, Some(new_expiry), extension_days, fee_paid);
         Ok(())
     }
 }
@@ -2013,17 +2498,24 @@ fn set_platform_fee_internal(env: &Env, actor: Address, new_fee: u32) -> Result<
 }
 
 /// Compares tracked per-asset liability against the contract's actual SAC
-/// balance for `asset` (#570). `surplus` is the excess above what's owed —
-/// rounding dust or an accidental direct transfer, not customer liability —
-/// and goes negative only if the balance no longer covers tracked liability.
+/// balance for `asset` (#570). The tracked amount includes pending, disputed,
+/// and backed revenue-rounding reserves.
 fn compute_asset_solvency(env: &Env, asset: &Address) -> AssetSolvency {
     let liability = Storage::get_asset_liability(env, asset);
-    let tracked_liability = liability.pending.saturating_add(liability.disputed);
+    let rounding_reserve = Storage::get_revenue_rounding_report(env, asset).reserve_stroops;
+    let tracked_liability = liability
+        .pending
+        .checked_add(liability.disputed)
+        .and_then(|amount| amount.checked_add(rounding_reserve))
+        .unwrap_or(i128::MAX);
     let actual_balance = token::Client::new(env, asset).balance(&env.current_contract_address());
+    let surplus = actual_balance
+        .checked_sub(tracked_liability)
+        .unwrap_or(i128::MIN);
     AssetSolvency {
         tracked_liability,
         actual_balance,
-        surplus: actual_balance.saturating_sub(tracked_liability),
+        surplus,
     }
 }
 
@@ -2134,28 +2626,27 @@ fn execute_buy_with_required_price(
         0
     };
 
-    let deductions = fee_amount
-        .checked_add(referral_amount)
-        .ok_or(Error::ArithmeticOverflow)?;
-
-    let mut split_total: i128 = 0;
+    let mut allocated_bps = fee_percentage;
+    if referrer.is_some() {
+        allocated_bps = allocated_bps
+            .checked_add(referral_percentage)
+            .ok_or(Error::ArithmeticOverflow)?;
+    }
     for i in 0..prompt.splits.len() {
         let split = prompt.splits.get(i).unwrap();
-        let split_amount = payment_amount_stroops
-            .checked_mul(split.bps as i128)
-            .ok_or(Error::ArithmeticOverflow)?
-            / MAX_BPS as i128;
-        split_total = split_total
-            .checked_add(split_amount)
+        allocated_bps = allocated_bps
+            .checked_add(split.bps)
             .ok_or(Error::ArithmeticOverflow)?;
     }
 
-    let total_deductions = deductions
-        .checked_add(split_total)
+    ensure(allocated_bps <= MAX_BPS, Error::InvalidSplits)?;
+    let creator_bps = MAX_BPS
+        .checked_sub(allocated_bps)
         .ok_or(Error::ArithmeticOverflow)?;
     let creator_amount = payment_amount_stroops
-        .checked_sub(total_deductions)
-        .ok_or(Error::ArithmeticOverflow)?;
+        .checked_mul(creator_bps as i128)
+        .ok_or(Error::ArithmeticOverflow)?
+        / MAX_BPS as i128;
 
     ensure(creator_amount >= 0, Error::InvalidSplits)?;
 
@@ -2192,16 +2683,12 @@ fn execute_buy_with_required_price(
 
     // Snapshot the complete payout plan at purchase time (#562).
     let mut payout_splits: Vec<super::types::PayoutSplit> = Vec::new(env);
-    let mut split_total: i128 = 0;
     for i in 0..prompt.splits.len() {
         let split = prompt.splits.get(i).unwrap();
         let split_amount = payment_amount_stroops
             .checked_mul(split.bps as i128)
             .ok_or(Error::ArithmeticOverflow)?
             / MAX_BPS as i128;
-        split_total = split_total
-            .checked_add(split_amount)
-            .ok_or(Error::ArithmeticOverflow)?;
         if split_amount > 0 {
             payout_splits.push_back(super::types::PayoutSplit {
                 recipient: split.recipient.clone(),
@@ -2219,6 +2706,44 @@ fn execute_buy_with_required_price(
         splits: payout_splits,
         creator_amount,
     };
+    let mut rounding_shares: Vec<RevenueRoundingShare> = Vec::new(env);
+    if fee_percentage > 0 {
+        rounding_shares.push_back(RevenueRoundingShare {
+            recipient: fee_wallet.clone(),
+            kind: RevenueShareKind::PlatformFee,
+            source_id: 0,
+            bps: fee_percentage,
+        });
+    }
+    if let Some(ref referrer) = referrer {
+        if referral_percentage > 0 {
+            rounding_shares.push_back(RevenueRoundingShare {
+                recipient: referrer.clone(),
+                kind: RevenueShareKind::Referral,
+                source_id: 0,
+                bps: referral_percentage,
+            });
+        }
+    }
+    for i in 0..prompt.splits.len() {
+        let split = prompt.splits.get(i).unwrap();
+        if split.bps > 0 {
+            rounding_shares.push_back(RevenueRoundingShare {
+                recipient: split.recipient,
+                kind: RevenueShareKind::Collaborator,
+                source_id: prompt_id,
+                bps: split.bps,
+            });
+        }
+    }
+    if creator_bps > 0 {
+        rounding_shares.push_back(RevenueRoundingShare {
+            recipient: prompt.creator.clone(),
+            kind: RevenueShareKind::Creator,
+            source_id: 0,
+            bps: creator_bps,
+        });
+    }
 
     let escrow = PurchaseEscrow {
         prompt_id,
@@ -2238,6 +2763,15 @@ fn execute_buy_with_required_price(
         payout_plan,
     };
     Storage::save_purchase_escrow(env, &escrow);
+    Storage::save_purchase_rounding_plan(
+        env,
+        prompt_id,
+        buyer,
+        now,
+        &PurchaseRoundingPlan {
+            shares: rounding_shares,
+        },
+    );
     // Escrow was just created Pending — its full amount is now tracked
     // liability for this asset until settled or refunded (#570).
     Storage::add_pending_liability(env, &escrow.asset, escrow.amount)?;
@@ -2426,26 +2960,17 @@ fn validate_bulk_purchase_items(
         let payment_amount = payment_amounts.get(i).unwrap();
 
         // Check each condition independently; record true if all pass
-        let is_valid = 
-            // Prompt must exist
-            Storage::get_prompt(env, prompt_id).is_some() &&
-            // If found, validate purchase eligibility
-            if let Some(prompt) = Storage::get_prompt(env, prompt_id) {
-                // Must be active
-                prompt.status == PromptSaleStatus::Active &&
-                // Buyer cannot be creator
-                prompt.creator != *buyer &&
-                // Must not already own
-                !Storage::has_active_purchase(env, prompt_id, buyer, now) &&
-                // Check expiry if set
-                (prompt.expires_at == 0 || prompt.expires_at >= now) &&
-                // Payment must meet price
-                payment_amount >= prompt.price_stroops &&
-                // Supply must have room
-                reserve_supply(prompt.sales_count, prompt.max_supply).is_ok()
-            } else {
-                false
-            };
+        let is_valid = match Storage::get_prompt(env, prompt_id) {
+            Some(prompt) => {
+                prompt.status == PromptSaleStatus::Active
+                    && prompt.creator != *buyer
+                    && !Storage::has_active_purchase(env, prompt_id, buyer, now)
+                    && (prompt.expires_at == 0 || prompt.expires_at >= now)
+                    && payment_amount >= prompt.price_stroops
+                    && reserve_supply(prompt.sales_count, prompt.max_supply).is_ok()
+            }
+            None => false,
+        };
 
         validity.push_back(is_valid);
     }
@@ -2481,7 +3006,7 @@ fn ensure(condition: bool, error: Error) -> Result<(), Error> {
 /// (#540/#565). There is no plain-build API for a contract's raw identity
 /// hash, so this hashes the current contract address's string encoding —
 /// available without enabling the SDK's `hazmat-address` feature.
-fn current_contract_id_hash(env: &Env) -> BytesN<32> {
+pub fn current_contract_id_hash(env: &Env) -> BytesN<32> {
     env.crypto()
         .sha256(&env.current_contract_address().to_string().to_bytes())
         .to_bytes()

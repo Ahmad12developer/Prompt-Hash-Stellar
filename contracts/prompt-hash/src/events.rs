@@ -1,5 +1,5 @@
-use super::types::PromptSaleStatus;
-use soroban_sdk::{contractevent, Address, BytesN, Env};
+use super::types::{ModerationReason, PromptSaleStatus};
+use soroban_sdk::{contractevent, Address, BytesN, Env, String};
 
 #[contractevent]
 struct PromptCreated {
@@ -23,6 +23,10 @@ struct PromptAdminModerated {
     pub prompt_id: u64,
     pub admin: Address,
     pub status: PromptSaleStatus,
+    pub previous_state: PromptSaleStatus,
+    pub reason: ModerationReason,
+    pub policy_reference: String,
+    pub reverses_timestamp: u64,
 }
 
 #[contractevent]
@@ -79,6 +83,16 @@ struct VoucherRemoved {
 #[contractevent]
 struct ContractPausedStateChanged {
     pub is_paused: bool,
+}
+
+#[contractevent]
+struct ListingExtended {
+    #[topic]
+    pub prompt_id: u128,
+    pub creator: Address,
+    pub new_expires_at: Option<u64>,
+    pub extension_days: u64,
+    pub fee_paid: i128,
 }
 
 #[contractevent]
@@ -164,6 +178,26 @@ struct ListingRevised {
 struct SplitsUpdated {
     #[topic]
     pub prompt_id: u64,
+}
+
+/// Emitted when catalog secondary indexes are verified or repaired (#652).
+#[contractevent]
+struct CatalogIndexesRepaired {
+    #[topic]
+    pub admin: Address,
+    pub start_id: u64,
+    pub end_id: u64,
+    pub repairs_applied: u32,
+    pub is_dry_run: bool,
+}
+
+/// Emitted when a sales counter is reconciled against immutable records (#653).
+#[contractevent]
+struct SalesCounterReconciled {
+    #[topic]
+    pub prompt_id: u64,
+    pub old_count: u64,
+    pub new_count: u64,
 }
 
 #[contractevent]
@@ -271,11 +305,19 @@ impl Events {
         prompt_id: u64,
         admin: Address,
         status: PromptSaleStatus,
+        previous_state: PromptSaleStatus,
+        reason: ModerationReason,
+        policy_reference: String,
+        reverses_timestamp: u64,
     ) {
         PromptAdminModerated {
             prompt_id,
             admin,
             status,
+            previous_state,
+            reason,
+            policy_reference,
+            reverses_timestamp,
         }
         .publish(env);
     }
@@ -357,6 +399,22 @@ impl Events {
         .publish(env);
     }
 
+    pub fn emit_listing_extended(
+        env: &Env,
+        prompt_id: u128,
+        creator: Address,
+        new_expires_at: Option<u64>,
+        extension_days: u64,
+        fee_paid: i128,
+    ) {
+        ListingExtended {
+            prompt_id,
+            creator,
+            new_expires_at,
+            extension_days,
+            fee_paid,
+        }
+        .publish(env);
     pub fn emit_contract_paused_state_changed(env: &Env, is_paused: bool) {
         ContractPausedStateChanged { is_paused }.publish(env);
     }
@@ -546,6 +604,38 @@ impl Events {
         PromptMaxSupplyUpdated {
             prompt_id,
             max_supply,
+        }
+        .publish(env);
+    }
+
+    pub fn emit_catalog_indexes_repaired(
+        env: &Env,
+        admin: Address,
+        start_id: u64,
+        end_id: u64,
+        repairs_applied: u32,
+        is_dry_run: bool,
+    ) {
+        CatalogIndexesRepaired {
+            admin,
+            start_id,
+            end_id,
+            repairs_applied,
+            is_dry_run,
+        }
+        .publish(env);
+    }
+
+    pub fn emit_sales_counter_reconciled(
+        env: &Env,
+        prompt_id: u64,
+        old_count: u64,
+        new_count: u64,
+    ) {
+        SalesCounterReconciled {
+            prompt_id,
+            old_count,
+            new_count,
         }
         .publish(env);
     }
