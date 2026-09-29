@@ -34,6 +34,36 @@ const notificationSchema = new mongoose.Schema(
       type: String,
       default: "",
     },
+    sourceEventId: {
+      type: String,
+      required: true,
+      index: true,
+    },
+    dedupeKey: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+    deliveryStatus: {
+      type: String,
+      enum: ["pending", "delivered", "failed"],
+      default: "delivered",
+      index: true,
+    },
+    attempts: {
+      type: Number,
+      default: 1,
+      min: 0,
+    },
+    lastError: {
+      type: String,
+      default: "",
+    },
+    deliveredAt: {
+      type: Date,
+      default: Date.now,
+    },
     read: {
       type: Boolean,
       default: false,
@@ -44,6 +74,7 @@ const notificationSchema = new mongoose.Schema(
 );
 
 notificationSchema.index({ recipientWallet: 1, read: 1, createdAt: -1 });
+notificationSchema.index({ sourceEventId: 1, recipientWallet: 1 });
 
 const Notification = mongoose.models.Notification || mongoose.model("Notification", notificationSchema);
 export default Notification;
