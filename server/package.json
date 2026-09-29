@@ -22,7 +22,8 @@
     "seed:preview": "node scripts/seedPreview.mjs",
     "db:migrate": "ts-node src/db/migrateCli.ts up",
     "db:rollback": "ts-node src/db/rollbackCli.ts",
-    "retention:enqueue": "ts-node scripts/enqueueRetentionCleanup.ts"
+    "retention:enqueue": "ts-node scripts/enqueueRetentionCleanup.ts",
+    "data:integrity:monitor": "ts-node scripts/dataIntegrityMonitor.ts"
   },
   "files": [
     "build"
