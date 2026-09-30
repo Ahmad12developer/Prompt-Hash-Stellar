@@ -2909,28 +2909,19 @@ __metadata:
 
 "@prompthash/schema@file:../packages/schema::locator=prompthash-server%40workspace%3Aserver":
   version: 0.1.0
-  resolution: "@prompthash/schema@file:../packages/schema#../packages/schema::hash=f26229&locator=prompthash-server%40workspace%3Aserver"
+  resolution: "@prompthash/schema@file:../packages/schema#../packages/schema::hash=6fa645&locator=prompthash-server%40workspace%3Aserver"
   dependencies:
     zod: "npm:^4.4.3"
-  checksum: 10c0/8d51248e2843306641bc8434b2d890b16e66526ff339ef52e91c6951c736a3ad34aed14d8fb5dd18856761fb08f2ecb54637dfca6b36f17cf456d569cc4da7dd
-  languageName: node
-  linkType: hard
-
-"@prompthash/schema@file:./packages/schema::locator=prompt-hash-stellar%40file%3A..%23..%3A%3Ahash%3D4b4ead%26locator%3Dprompthash-server%2540workspace%253Aserver":
-  version: 0.1.0
-  resolution: "@prompthash/schema@file:./packages/schema#./packages/schema::hash=f26229&locator=prompt-hash-stellar%40file%3A..%23..%3A%3Ahash%3D4b4ead%26locator%3Dprompthash-server%2540workspace%253Aserver"
-  dependencies:
-    zod: "npm:^4.4.3"
-  checksum: 10c0/8d51248e2843306641bc8434b2d890b16e66526ff339ef52e91c6951c736a3ad34aed14d8fb5dd18856761fb08f2ecb54637dfca6b36f17cf456d569cc4da7dd
+  checksum: 10c0/6e19892ee401b51bf388390a63230f962ff2674f6eb291c7c4ea959b5b31b0eb75ee8b474457c95e9ab018e6d812f424c781e657e6c37eb5cb2b45d5c693145c
   languageName: node
   linkType: hard
 
 "@prompthash/schema@file:./packages/schema::locator=prompt-hash-stellar%40workspace%3A.":
   version: 0.1.0
-  resolution: "@prompthash/schema@file:./packages/schema#./packages/schema::hash=f26229&locator=prompt-hash-stellar%40workspace%3A."
+  resolution: "@prompthash/schema@file:./packages/schema#./packages/schema::hash=6fa645&locator=prompt-hash-stellar%40workspace%3A."
   dependencies:
     zod: "npm:^4.4.3"
-  checksum: 10c0/8d51248e2843306641bc8434b2d890b16e66526ff339ef52e91c6951c736a3ad34aed14d8fb5dd18856761fb08f2ecb54637dfca6b36f17cf456d569cc4da7dd
+  checksum: 10c0/6e19892ee401b51bf388390a63230f962ff2674f6eb291c7c4ea959b5b31b0eb75ee8b474457c95e9ab018e6d812f424c781e657e6c37eb5cb2b45d5c693145c
   languageName: node
   linkType: hard
 
@@ -2947,11 +2938,11 @@ __metadata:
 
 "@prompthash/sdk@file:../packages/sdk::locator=prompthash-server%40workspace%3Aserver":
   version: 0.1.0
-  resolution: "@prompthash/sdk@file:../packages/sdk#../packages/sdk::hash=e5f953&locator=prompthash-server%40workspace%3Aserver"
+  resolution: "@prompthash/sdk@file:../packages/sdk#../packages/sdk::hash=56c7e3&locator=prompthash-server%40workspace%3Aserver"
   dependencies:
     "@stellar/stellar-sdk": "npm:^17.1.0"
     libsodium-wrappers: "npm:^0.8.4"
-  checksum: 10c0/b7be8daf33362ce2a421db1e0086d9c9759a319fb8af5991d6c6a1a79897e07c1de69c183053610ea7c0d189daf65e5e5e12815b561f55b7339c65e9c343f613
+  checksum: 10c0/b5268a2ca2050f6f21c0b51b8e796a8c2c364b26339f9d8cabda76a69ff771c137c9449347ae8b43c1f5e9d7ac913304dd22a759f9dd38ef042692f4607ee0d8
   languageName: node
   linkType: hard
 
@@ -14283,60 +14274,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"prompt-hash-stellar@file:..::locator=prompthash-server%40workspace%3Aserver":
-  version: 0.1.0
-  resolution: "prompt-hash-stellar@file:..#..::hash=4b4ead&locator=prompthash-server%40workspace%3Aserver"
-  dependencies:
-    "@creit.tech/stellar-wallets-kit": "npm:^2.5.0"
-    "@hookform/resolvers": "npm:^5.5.7"
-    "@jadonamite/automata-sdk": "npm:^1.0.1"
-    "@prompthash/schema": "file:./packages/schema"
-    "@radix-ui/react-avatar": "npm:^1.2.1"
-    "@radix-ui/react-dialog": "npm:^1.1.18"
-    "@radix-ui/react-dropdown-menu": "npm:^2.1.19"
-    "@radix-ui/react-progress": "npm:^1.1.11"
-    "@radix-ui/react-select": "npm:^2.3.2"
-    "@radix-ui/react-slider": "npm:^1.4.2"
-    "@radix-ui/react-slot": "npm:^1.2.4"
-    "@radix-ui/react-tabs": "npm:^1.1.16"
-    "@radix-ui/react-tooltip": "npm:^1.2.11"
-    "@sentry/react": "npm:^10.62.0"
-    "@sentry/vite-plugin": "npm:^5.3.0"
-    "@stellar/design-system": "npm:^4.0.2"
-    "@stellar/stellar-base": "npm:^15.0.0"
-    "@stellar/stellar-sdk": "npm:^17.1.0"
-    "@tailwindcss/vite": "npm:^4.3.3"
-    "@tanstack/query-sync-storage-persister": "npm:^5.101.4"
-    "@tanstack/react-query": "npm:^5.103.2"
-    "@tanstack/react-query-persist-client": "npm:^5.101.4"
-    boring-avatars: "npm:^2.0.4"
-    chart.js: "npm:^4.5.1"
-    class-variance-authority: "npm:^0.7.1"
-    clsx: "npm:^2.1.1"
-    framer-motion: "npm:^12.38.0"
-    i18next: "npm:^26.3.0"
-    i18next-browser-languagedetector: "npm:^8.2.1"
-    libsodium-wrappers: "npm:^0.8.4"
-    lucide-react: "npm:^1.8.0"
-    react: "npm:^19.2.5"
-    react-chartjs-2: "npm:^5.3.1"
-    react-dom: "npm:^19.2.5"
-    react-hook-form: "npm:^7.83.0"
-    react-i18next: "npm:^17.0.8"
-    react-markdown: "npm:^10.1.0"
-    react-router-dom: "npm:^7.14.2"
-    recharts: "npm:^2.15.4"
-    redis: "npm:^6.1.0"
-    rehype-sanitize: "npm:^6.0.0"
-    remark-gfm: "npm:^4.0.1"
-    sonner: "npm:^2.0.7"
-    tailwind-merge: "npm:^3.5.0"
-    tailwindcss-animate: "npm:^1.0.7"
-    zod: "npm:^4.4.3"
-  checksum: 10c0/6b41fb77c97fddd619b425809a73b0826d6d2eb11551ce9f65d23799bf8c1a37c8d2ed9b120270462f78c59d797acd8dc88abbb85c9257accd3b6f5e92447020
-  languageName: node
-  linkType: hard
-
 "prompt-hash-stellar@workspace:.":
   version: 0.0.0-use.local
   resolution: "prompt-hash-stellar@workspace:."
@@ -14447,7 +14384,6 @@ __metadata:
     mongodb-memory-server: "npm:^11.3.0"
     mongoose: "npm:^9.5.0"
     nodemon: "npm:^3.1.14"
-    prompt-hash-stellar: "file:.."
     redis: "npm:^6.0.1"
     ts-node: "npm:^10.9.2"
     typescript: "npm:^6.0.3"

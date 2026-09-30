@@ -10,7 +10,6 @@ export interface SortableRecord {
   status?: string;
   createdAt?: string | number | Date;
   id?: string | number | bigint;
-  [key: string]: any;
 }
 
 /**
