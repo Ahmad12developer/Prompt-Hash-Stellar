@@ -154,11 +154,11 @@ describe("Provenance Service - Import Tracking", () => {
     const record = store.createRecord({
       promptId: "prompt_3",
       onChainId: "123",
-      sourceType: "BLOCKCHAIN" as ImportSourceType,
-      actor: { walletAddress: "GTEST456", timestamp: new Date() },
+      sourceType: "system" as ImportSourceType,
+      actor: { actorType: "system" as const, actorId: "system", actorWallet: "GTEST456" },
     });
 
-    expect(record.sourceType).toBe("BLOCKCHAIN");
+    expect(record.sourceType).toBe("system");
     expect(record.onChainId).toBe("123");
   });
 });
@@ -173,82 +173,82 @@ describe("Provenance Service - Derived Records", () => {
     const parentRecord = store.createRecord({
       promptId: "prompt_parent",
       onChainId: "100",
-      sourceType: "BLOCKCHAIN" as ImportSourceType,
-      actor: { walletAddress: "GPARENT", timestamp: new Date() },
+      sourceType: "system" as ImportSourceType,
+      actor: { actorType: "system" as const, actorId: "system", actorWallet: "GPARENT" },
     });
 
     // Create derived record
     const derivedRecord = store.createRecord({
       promptId: "prompt_fork",
       onChainId: "101",
-      sourceType: "BLOCKCHAIN" as ImportSourceType,
+      sourceType: "fork" as ImportSourceType,
       parentRecordId: parentRecord._id,
       transformations: [
         {
-          transformType: "FORK" as TransformType,
+          transformType: "customization" as TransformType,
           timestamp: new Date(),
-          actor: { walletAddress: "GCHILD", timestamp: new Date() },
+          actor: { actorType: "user" as const, actorId: "user_1", actorWallet: "GCHILD" },
           details: "Forked from prompt 100",
         },
       ],
-      actor: { walletAddress: "GCHILD", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "user_1", actorWallet: "GCHILD" },
     });
 
     expect(derivedRecord.parentRecordId).toBe(parentRecord._id);
-    expect(derivedRecord.transformations[0].transformType).toBe("FORK");
+    expect(derivedRecord.transformations[0].transformType).toBe("customization");
   });
 
   it("tracks a remix with transformation details", async () => {
     const record = store.createRecord({
       promptId: "prompt_remix",
-      sourceType: "BLOCKCHAIN" as ImportSourceType,
+      sourceType: "system" as ImportSourceType,
       transformations: [
         {
-          transformType: "REMIX" as TransformType,
+          transformType: "merge" as TransformType,
           timestamp: new Date(),
-          actor: { walletAddress: "GREMIXER", timestamp: new Date() },
+          actor: { actorType: "user" as const, actorId: "user_remix", actorWallet: "GREMIXER" },
           details: "Enhanced with additional context",
         },
       ],
-      actor: { walletAddress: "GREMIXER", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "user_remix", actorWallet: "GREMIXER" },
     });
 
-    expect(record.transformations[0].transformType).toBe("REMIX");
+    expect(record.transformations[0].transformType).toBe("merge");
     expect(record.transformations[0].details).toContain("Enhanced");
   });
 
   it("supports multiple transformations in lineage", async () => {
     const record = store.createRecord({
       promptId: "prompt_multi",
-      sourceType: "FILE_UPLOAD" as ImportSourceType,
+      sourceType: "file_upload" as ImportSourceType,
       transformations: [
         {
-          transformType: "FORMAT_CONVERSION" as TransformType,
+          transformType: "format_conversion" as TransformType,
           timestamp: new Date(),
-          actor: { userId: "converter", timestamp: new Date() },
+          actor: { actorType: "user" as const, actorId: "converter" },
           details: "Converted from CSV",
         },
         {
-          transformType: "VALIDATION" as TransformType,
+          transformType: "customization" as TransformType,
           timestamp: new Date(),
-          actor: { userId: "validator", timestamp: new Date() },
+          actor: { actorType: "user" as const, actorId: "validator" },
           details: "Validated content structure",
         },
         {
-          transformType: "ENRICHMENT" as TransformType,
+          transformType: "customization" as TransformType,
           timestamp: new Date(),
-          actor: { userId: "enricher", timestamp: new Date() },
+          actor: { actorType: "user" as const, actorId: "enricher" },
           details: "Added metadata",
         },
       ],
-      actor: { userId: "importer", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "importer" },
     });
 
     expect(record.transformations).toHaveLength(3);
     expect(record.transformations.map((t: any) => t.transformType)).toEqual([
-      "FORMAT_CONVERSION",
-      "VALIDATION",
-      "ENRICHMENT",
+      "format_conversion",
+      "customization",
+      "customization",
     ]);
   });
 });
@@ -261,16 +261,16 @@ describe("Provenance Service - Update Tracking", () => {
   it("tracks a content update", async () => {
     const record = store.createRecord({
       promptId: "prompt_update",
-      sourceType: "MANUAL_ENTRY" as ImportSourceType,
+      sourceType: "manual" as ImportSourceType,
       transformations: [],
-      actor: { userId: "creator", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "creator" },
     });
 
     // Add update transformation
     record.transformations.push({
       transformType: "CONTENT_ENHANCEMENT" as TransformType,
       timestamp: new Date(),
-      actor: { userId: "editor", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "editor" },
       details: "Updated content",
       metadata: { changedFields: ["content", "title"] },
     });
@@ -288,33 +288,33 @@ describe("Provenance Service - Update Tracking", () => {
       promptId: "prompt_version",
       sourceType: "BLOCKCHAIN" as ImportSourceType,
       transformations: [],
-      actor: { walletAddress: "GVERSION", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "user", actorWallet: "GVERSION" },
     });
 
     record.transformations.push({
-      transformType: "VERSION_UPDATE" as TransformType,
+      transformType: "customization" as TransformType,
       timestamp: new Date(),
-      actor: { walletAddress: "GVERSION", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "user", actorWallet: "GVERSION" },
       details: "Version updated to 2",
     });
 
     await record.save();
 
     const updated = store.records.find((r: any) => r._id === record._id);
-    expect(updated.transformations[0].transformType).toBe("VERSION_UPDATE");
+    expect(updated.transformations[0].transformType).toBe("customization");
   });
 
   it("preserves update history through multiple changes", async () => {
     const record = store.createRecord({
       promptId: "prompt_history",
-      sourceType: "MANUAL_ENTRY" as ImportSourceType,
+      sourceType: "manual" as ImportSourceType,
       transformations: [],
-      actor: { userId: "creator", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "creator" },
     });
 
     // Add multiple updates
     const updates = [
-      { type: "ENRICHMENT" as TransformType, detail: "Added tags" },
+      { type: "customization" as TransformType, detail: "Added tags" },
       { type: "NORMALIZATION" as TransformType, detail: "Price updated" },
       { type: "CONTENT_ENHANCEMENT" as TransformType, detail: "Content refined" },
     ];
@@ -323,7 +323,7 @@ describe("Provenance Service - Update Tracking", () => {
       record.transformations.push({
         transformType: update.type,
         timestamp: new Date(),
-        actor: { userId: "editor", timestamp: new Date() },
+        actor: { actorType: "user" as const, actorId: "editor" },
         details: update.detail,
       });
     }
@@ -343,15 +343,15 @@ describe("Provenance Service - Archival and Restoration", () => {
   it("archives a provenance record", async () => {
     const record = store.createRecord({
       promptId: "prompt_archive",
-      sourceType: "MANUAL_ENTRY" as ImportSourceType,
+      sourceType: "manual" as ImportSourceType,
       transformations: [],
-      actor: { userId: "creator", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "creator" },
     });
 
     record.transformations.push({
-      transformType: "VALIDATION" as TransformType,
+      transformType: "customization" as TransformType,
       timestamp: new Date(),
-      actor: { userId: "admin", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "admin" },
       details: "Prompt archived: Policy violation",
       metadata: { archived: true, archivedAt: new Date().toISOString() },
     });
@@ -365,23 +365,23 @@ describe("Provenance Service - Archival and Restoration", () => {
   it("restores an archived record", async () => {
     const record = store.createRecord({
       promptId: "prompt_restore",
-      sourceType: "MANUAL_ENTRY" as ImportSourceType,
+      sourceType: "manual" as ImportSourceType,
       transformations: [
         {
-          transformType: "VALIDATION" as TransformType,
+          transformType: "customization" as TransformType,
           timestamp: new Date(),
-          actor: { userId: "admin", timestamp: new Date() },
+          actor: { actorType: "user" as const, actorId: "admin" },
           details: "Prompt archived",
           metadata: { archived: true },
         },
       ],
-      actor: { userId: "creator", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "creator" },
     });
 
     record.transformations.push({
-      transformType: "VALIDATION" as TransformType,
+      transformType: "customization" as TransformType,
       timestamp: new Date(),
-      actor: { userId: "admin", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "admin" },
       details: "Prompt restored from archive",
       metadata: { restored: true, restoredAt: new Date().toISOString() },
     });
@@ -405,21 +405,21 @@ describe("Provenance Service - Lineage Queries", () => {
       promptId: "prompt_1",
       sourceType: "BULK_IMPORT" as ImportSourceType,
       importBatch: { batchId, totalItems: 3 },
-      actor: { userId: "importer", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "importer" },
     });
 
     store.createRecord({
       promptId: "prompt_2",
       sourceType: "BULK_IMPORT" as ImportSourceType,
       importBatch: { batchId, totalItems: 3 },
-      actor: { userId: "importer", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "importer" },
     });
 
     store.createRecord({
       promptId: "prompt_3",
       sourceType: "BULK_IMPORT" as ImportSourceType,
       importBatch: { batchId, totalItems: 3 },
-      actor: { userId: "importer", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "importer" },
     });
 
     const batchRecords = store.records.filter(
@@ -436,21 +436,21 @@ describe("Provenance Service - Lineage Queries", () => {
       _id: parentId,
       promptId: "prompt_parent",
       sourceType: "BLOCKCHAIN" as ImportSourceType,
-      actor: { walletAddress: "GPARENT", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "user", actorWallet: "GPARENT" },
     });
 
     store.createRecord({
       promptId: "prompt_child1",
       sourceType: "BLOCKCHAIN" as ImportSourceType,
       parentRecordId: parentId,
-      actor: { walletAddress: "GCHILD1", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "user", actorWallet: "GCHILD1" },
     });
 
     store.createRecord({
       promptId: "prompt_child2",
       sourceType: "BLOCKCHAIN" as ImportSourceType,
       parentRecordId: parentId,
-      actor: { walletAddress: "GCHILD2", timestamp: new Date() },
+      actor: { actorType: "user" as const, actorId: "user", actorWallet: "GCHILD2" },
     });
 
     const derivatives = store.records.filter(
@@ -515,3 +515,5 @@ describe("Provenance Service - Diff Generation", () => {
     expect(modifications.price).toEqual({ old: 100, new: 150 });
   });
 });
+
+

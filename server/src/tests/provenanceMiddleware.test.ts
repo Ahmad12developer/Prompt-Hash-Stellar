@@ -138,7 +138,7 @@ describe("Provenance Middleware - Update Tracking", () => {
 
     expect(hasContentChange).toBe(true);
     
-    const updateType = hasContentChange ? "CONTENT_ENHANCEMENT" : "NORMALIZATION";
+    const updateType = hasContentChange ? "CONTENT_ENHANCEMENT" : "customization";
     expect(updateType).toBe("CONTENT_ENHANCEMENT");
   });
 
@@ -151,8 +151,8 @@ describe("Provenance Middleware - Update Tracking", () => {
 
     expect(hasMetadataChange).toBe(true);
     
-    const updateType = hasMetadataChange ? "ENRICHMENT" : "NORMALIZATION";
-    expect(updateType).toBe("ENRICHMENT");
+    const updateType = hasMetadataChange ? "customization" : "customization";
+    expect(updateType).toBe("customization");
   });
 
   it("classifies updates as VERSION_UPDATE", () => {
@@ -162,7 +162,7 @@ describe("Provenance Middleware - Update Tracking", () => {
 
     expect(hasVersionChange).toBe(true);
     
-    const updateType = hasVersionChange ? "VERSION_UPDATE" : "NORMALIZATION";
+    const updateType = hasVersionChange ? "VERSION_UPDATE" : "customization";
     expect(updateType).toBe("VERSION_UPDATE");
   });
 
@@ -220,7 +220,7 @@ describe("Provenance Middleware - Actor Extraction", () => {
     } as any;
 
     const actor = {
-      userId: (req as any).user?.id,
+      actorId: (req as any).user?.id,
       actorType: (req as any).user?.role === "admin" ? "admin" : "user",
       ipAddress: req.ip,
       userAgent: req.get?.("user-agent"),
@@ -238,7 +238,7 @@ describe("Provenance Middleware - Actor Extraction", () => {
     } as any;
 
     const actor = {
-      userId: (req as any).user?.id,
+      actorId: (req as any).user?.id,
       walletAddress: (req as any).user?.walletAddress,
       actorType: (req as any).user?.role === "admin" ? "admin" : "user",
     };
@@ -255,7 +255,7 @@ describe("Provenance Middleware - Actor Extraction", () => {
 
     const actor = {
       actorType: (req as any).user ? "user" : "system",
-      userId: (req as any).user?.id || "system",
+      actorId: (req as any).user?.id || "system",
     };
 
     expect(actor.actorType).toBe("system");
@@ -311,7 +311,7 @@ describe("Provenance Middleware - Error Handling", () => {
     // Should not throw when extracting from incomplete request
     const actor = {
       actorType: "system",
-      userId: "system",
+      actorId: "system",
       ipAddress: req.ip,
       userAgent: req.get?.("user-agent"),
     };
@@ -339,7 +339,7 @@ describe("Provenance Middleware - Integration", () => {
     const promptId = "prompt_1";
     const updateType = "CONTENT_ENHANCEMENT";
     const actor = {
-      userId: "user_123",
+      actorId: "user_123",
       walletAddress: "GTEST",
       timestamp: new Date(),
     };
@@ -356,3 +356,4 @@ describe("Provenance Middleware - Integration", () => {
     expect(promise).toBeInstanceOf(Promise);
   });
 });
+
