@@ -717,3 +717,321 @@ export async function getDerivativesWithProvenance(promptId: string): Promise<an
     (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
   );
 }
+
+
+/**
+ * Track a prompt update and preserve provenance history.
+ * Adds a new transformation to the existing provenance record.
+ */
+export async function trackPromptUpdate(params: {
+  promptId: string;
+  onChainId?: string;
+  updateType: TransformType;
+  updateDetails: string;
+  actor: IActorMetadata;
+  changedFields?: string[];
+  previousVersion?: any;
+}): Promise<any> {
+  const { promptId, onChainId, updateType, updateDetails, actor, changedFields, previousVersion } = params;
+
+  try {
+    // 1. Find existing provenance record
+    let provenance = await ProvenanceRecord.findOne({
+      $or: [{ promptId }, { onChainId }],
+    });
+
+    if (!provenance) {
+      // If no provenance exists, create a minimal one for the update
+      logger.warn("No existing provenance found for update, creating new record", {
+        action: "trackPromptUpdate",
+        promptId,
+      });
+
+      provenance = await createProvenanceRecord({
+        promptId,
+        onChainId,
+        sourceType: "MANUAL_ENTRY",
+        sourceSystem: {
+          name: "PromptHash Platform",
+          version: "1.0",
+          identifier: `prompt_${onChainId || promptId}`,
+        },
+        actor,
+      });
+    }
+
+    // 2. Add transformation to the provenance record
+    const transformation: Partial<ITransformMetadata> = {
+      transformType: updateType,
+      timestamp: new Date(),
+      actor,
+      details: updateDetails,
+      metadata: {
+        changedFields: changedFields || [],
+        previousVersion: previousVersion ? JSON.stringify(previousVersion) : undefined,
+      },
+    };
+
+    provenance.transformations.push(transformation as any);
+    await provenance.save();
+
+    // 3. Update the prompt's updatedAt timestamp (handled by Mongoose)
+    await Prompt.findByIdAndUpdate(promptId, {
+      $set: { provenanceRecordId: provenance._id },
+    });
+
+    // 4. Record audit event
+    await recordAuditEvent({
+      actor: actor.walletAddress || actor.userId || "system",
+      action: "prompt.updated",
+      resource: `prompt:${promptId}`,
+      metadata: {
+        updateType,
+        changedFields,
+        provenanceRecordId: String(provenance._id),
+      },
+    });
+
+    logger.info("Tracked prompt update in provenance", {
+      action: "trackPromptUpdate",
+      promptId,
+      updateType,
+      transformationCount: provenance.transformations.length,
+    });
+
+    return {
+      provenanceRecord: provenance,
+      transformation,
+    };
+  } catch (error: any) {
+    logger.error("Failed to track prompt update", {
+      action: "trackPromptUpdate",
+      error: error.message,
+      promptId,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Preserve provenance when a prompt is deleted (soft delete).
+ * Marks the provenance record as archived but preserves all history.
+ */
+export async function archiveProvenance(params: {
+  promptId: string;
+  onChainId?: string;
+  actor: IActorMetadata;
+  reason?: string;
+}): Promise<void> {
+  const { promptId, onChainId, actor, reason } = params;
+
+  try {
+    const provenance = await ProvenanceRecord.findOne({
+      $or: [{ promptId }, { onChainId }],
+    });
+
+    if (!provenance) {
+      logger.warn("No provenance record found to archive", {
+        action: "archiveProvenance",
+        promptId,
+      });
+      return;
+    }
+
+    // Add archival transformation
+    provenance.transformations.push({
+      transformType: "VALIDATION", // Using VALIDATION to represent archival
+      timestamp: new Date(),
+      actor,
+      details: `Prompt archived: ${reason || "No reason provided"}`,
+      metadata: {
+        archived: true,
+        archivedAt: new Date().toISOString(),
+      },
+    } as any);
+
+    await provenance.save();
+
+    await recordAuditEvent({
+      actor: actor.walletAddress || actor.userId || "system",
+      action: "prompt.archived",
+      resource: `prompt:${promptId}`,
+      metadata: {
+        reason,
+        provenanceRecordId: String(provenance._id),
+      },
+    });
+
+    logger.info("Archived provenance record", {
+      action: "archiveProvenance",
+      promptId,
+    });
+  } catch (error: any) {
+    logger.error("Failed to archive provenance", {
+      action: "archiveProvenance",
+      error: error.message,
+      promptId,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Restore archived provenance when a prompt is undeleted.
+ */
+export async function restoreProvenance(params: {
+  promptId: string;
+  onChainId?: string;
+  actor: IActorMetadata;
+}): Promise<void> {
+  const { promptId, onChainId, actor } = params;
+
+  try {
+    const provenance = await ProvenanceRecord.findOne({
+      $or: [{ promptId }, { onChainId }],
+    });
+
+    if (!provenance) {
+      logger.warn("No provenance record found to restore", {
+        action: "restoreProvenance",
+        promptId,
+      });
+      return;
+    }
+
+    // Add restoration transformation
+    provenance.transformations.push({
+      transformType: "VALIDATION",
+      timestamp: new Date(),
+      actor,
+      details: "Prompt restored from archive",
+      metadata: {
+        restored: true,
+        restoredAt: new Date().toISOString(),
+      },
+    } as any);
+
+    await provenance.save();
+
+    await recordAuditEvent({
+      actor: actor.walletAddress || actor.userId || "system",
+      action: "prompt.restored",
+      resource: `prompt:${promptId}`,
+      metadata: {
+        provenanceRecordId: String(provenance._id),
+      },
+    });
+
+    logger.info("Restored provenance record", {
+      action: "restoreProvenance",
+      promptId,
+    });
+  } catch (error: any) {
+    logger.error("Failed to restore provenance", {
+      action: "restoreProvenance",
+      error: error.message,
+      promptId,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Get the complete update history for a prompt from its provenance.
+ */
+export async function getUpdateHistory(promptId: string): Promise<{
+  promptId: string;
+  totalUpdates: number;
+  updates: Array<{
+    transformType: string;
+    timestamp: Date;
+    actor: any;
+    details: string;
+    metadata?: any;
+  }>;
+}> {
+  const provenance = await ProvenanceRecord.findOne({
+    $or: [{ promptId }, { onChainId: promptId }],
+  });
+
+  if (!provenance) {
+    return {
+      promptId,
+      totalUpdates: 0,
+      updates: [],
+    };
+  }
+
+  // Filter for update-related transformations
+  const updateTransforms = [
+    "VERSION_UPDATE",
+    "CONTENT_ENHANCEMENT",
+    "NORMALIZATION",
+    "ENRICHMENT",
+    "VALIDATION",
+  ];
+
+  const updates = provenance.transformations
+    .filter((t) => updateTransforms.includes(t.transformType))
+    .map((t) => ({
+      transformType: t.transformType,
+      timestamp: t.timestamp,
+      actor: t.actor,
+      details: t.details,
+      metadata: t.metadata,
+    }));
+
+  return {
+    promptId,
+    totalUpdates: updates.length,
+    updates: updates.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()),
+  };
+}
+
+/**
+ * Compare two versions of a prompt and generate a diff summary.
+ */
+export function generateUpdateDiff(
+  previous: any,
+  current: any,
+): {
+  changedFields: string[];
+  additions: Record<string, any>;
+  deletions: Record<string, any>;
+  modifications: Record<string, { old: any; new: any }>;
+} {
+  const changedFields: string[] = [];
+  const additions: Record<string, any> = {};
+  const deletions: Record<string, any> = {};
+  const modifications: Record<string, { old: any; new: any }> = {};
+
+  const allKeys = new Set([...Object.keys(previous || {}), ...Object.keys(current || {})]);
+
+  for (const key of allKeys) {
+    // Skip internal fields
+    if (key.startsWith("_") || key === "__v" || key === "updatedAt") {
+      continue;
+    }
+
+    const prevValue = previous?.[key];
+    const currValue = current?.[key];
+
+    if (prevValue === undefined && currValue !== undefined) {
+      additions[key] = currValue;
+      changedFields.push(key);
+    } else if (prevValue !== undefined && currValue === undefined) {
+      deletions[key] = prevValue;
+      changedFields.push(key);
+    } else if (JSON.stringify(prevValue) !== JSON.stringify(currValue)) {
+      modifications[key] = { old: prevValue, new: currValue };
+      changedFields.push(key);
+    }
+  }
+
+  return {
+    changedFields,
+    additions,
+    deletions,
+    modifications,
+  };
+}

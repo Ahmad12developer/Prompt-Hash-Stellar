@@ -285,3 +285,71 @@ provenanceRouter.post(
     }
   },
 );
+
+
+// ── Provenance Preservation Through Updates (Issue #929) ────────────────────
+// POST /api/provenance/track-update       — track a prompt update
+// POST /api/provenance/archive            — archive provenance (soft delete)
+// POST /api/provenance/restore            — restore archived provenance
+// GET  /api/provenance/update-history/:promptId — get update history
+provenanceRouter.post(
+  "/track-update",
+  requireWalletSession((req: Request) => req.body?.actor?.walletAddress),
+  async (req: WalletSessionRequest, res: Response) => {
+    try {
+      await connectDb();
+      const result = await provenanceService.trackPromptUpdate({
+        ...req.body,
+        actor: {
+          ...req.body.actor,
+          walletAddress: req.sessionWallet,
+          timestamp: new Date(),
+        },
+      });
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || "Failed to track update" });
+    }
+  },
+);
+
+provenanceRouter.post(
+  "/archive",
+  requireAdminScope("provenance:write"),
+  async (req: Request, res: Response) => {
+    try {
+      await connectDb();
+      await provenanceService.archiveProvenance(req.body);
+      res.json({ success: true, message: "Provenance archived successfully" });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || "Failed to archive provenance" });
+    }
+  },
+);
+
+provenanceRouter.post(
+  "/restore",
+  requireAdminScope("provenance:write"),
+  async (req: Request, res: Response) => {
+    try {
+      await connectDb();
+      await provenanceService.restoreProvenance(req.body);
+      res.json({ success: true, message: "Provenance restored successfully" });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || "Failed to restore provenance" });
+    }
+  },
+);
+
+provenanceRouter.get(
+  "/update-history/:promptId",
+  async (req: Request, res: Response) => {
+    try {
+      await connectDb();
+      const history = await provenanceService.getUpdateHistory(req.params.promptId);
+      res.json(history);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to fetch update history" });
+    }
+  },
+);

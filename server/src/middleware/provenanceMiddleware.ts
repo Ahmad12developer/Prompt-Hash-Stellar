@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from "express";
-import { provenanceService } from "../services/provenanceService";
-import { ImportSourceType } from "../models/ProvenanceRecord";
+import { provenanceService, trackPromptUpdate } from "../services/provenanceService";
+import { ImportSourceType, TransformType, IActorMetadata } from "../models/ProvenanceRecord";
+import Prompt from "../models/Prompt";
 import { logger } from "../services/structuredLogger";
 
 /**
@@ -287,5 +288,181 @@ export async function trackBlockchainIndexing(params: {
   } catch (error) {
     logger.error("Failed to track blockchain provenance", { error, params });
     throw error;
+  }
+}
+
+
+/**
+ * Middleware to track prompt updates and preserve provenance.
+ * Use this as a post-update hook to automatically track changes.
+ */
+export async function trackPromptUpdateMiddleware(
+  promptId: string,
+  previousVersion: any,
+  currentVersion: any,
+  actor: IActorMetadata,
+): Promise<void> {
+  try {
+    // Generate diff to identify what changed
+    const diff = generateUpdateDiff(previousVersion, currentVersion);
+
+    if (diff.changedFields.length === 0) {
+      logger.debug("No changes detected, skipping provenance tracking", {
+        action: "trackPromptUpdateMiddleware",
+        promptId,
+      });
+      return;
+    }
+
+    // Determine the type of update based on changed fields
+    let updateType: TransformType = "NORMALIZATION";
+    let updateDetails = `Updated ${diff.changedFields.length} field(s): ${diff.changedFields.join(", ")}`;
+
+    // Classify the update type based on changed fields
+    if (diff.changedFields.some((f) => ["content", "encryptedPrompt", "preview"].includes(f))) {
+      updateType = "CONTENT_ENHANCEMENT";
+      updateDetails = "Content updated";
+    } else if (diff.changedFields.some((f) => ["title", "description", "category"].includes(f))) {
+      updateType = "ENRICHMENT";
+      updateDetails = "Metadata updated";
+    } else if (diff.changedFields.includes("price")) {
+      updateType = "NORMALIZATION";
+      updateDetails = `Price updated from ${diff.modifications.price?.old} to ${diff.modifications.price?.new}`;
+    } else if (diff.changedFields.includes("currentVersionIndex")) {
+      updateType = "VERSION_UPDATE";
+      updateDetails = `Version updated to ${currentVersion.currentVersionIndex}`;
+    }
+
+    await trackPromptUpdate({
+      promptId,
+      onChainId: currentVersion.onChainId,
+      updateType,
+      updateDetails,
+      actor,
+      changedFields: diff.changedFields,
+      previousVersion,
+    });
+  } catch (error: any) {
+    // Log error but don't fail the update
+    logger.error("Failed to track prompt update in middleware", {
+      action: "trackPromptUpdateMiddleware",
+      error: error.message,
+      promptId,
+    });
+  }
+}
+
+/**
+ * Helper to generate a diff between two prompt versions.
+ */
+function generateUpdateDiff(
+  previous: any,
+  current: any,
+): {
+  changedFields: string[];
+  additions: Record<string, any>;
+  deletions: Record<string, any>;
+  modifications: Record<string, { old: any; new: any }>;
+} {
+  const changedFields: string[] = [];
+  const additions: Record<string, any> = {};
+  const deletions: Record<string, any> = {};
+  const modifications: Record<string, { old: any; new: any }> = {};
+
+  const allKeys = new Set([...Object.keys(previous || {}), ...Object.keys(current || {})]);
+
+  for (const key of allKeys) {
+    // Skip internal fields
+    if (
+      key.startsWith("_") ||
+      key === "__v" ||
+      key === "updatedAt" ||
+      key === "createdAt"
+    ) {
+      continue;
+    }
+
+    const prevValue = previous?.[key];
+    const currValue = current?.[key];
+
+    if (prevValue === undefined && currValue !== undefined) {
+      additions[key] = currValue;
+      changedFields.push(key);
+    } else if (prevValue !== undefined && currValue === undefined) {
+      deletions[key] = prevValue;
+      changedFields.push(key);
+    } else if (JSON.stringify(prevValue) !== JSON.stringify(currValue)) {
+      modifications[key] = { old: prevValue, new: currValue };
+      changedFields.push(key);
+    }
+  }
+
+  return {
+    changedFields,
+    additions,
+    deletions,
+    modifications,
+  };
+}
+
+/**
+ * Express middleware wrapper for tracking updates.
+ * Can be used as route middleware for update endpoints.
+ */
+export function provenanceUpdateMiddleware(req: any, res: any, next: any) {
+  // Store original json method
+  const originalJson = res.json.bind(res);
+
+  // Override json method to capture response
+  res.json = function (body: any) {
+    // If this was a successful update, track provenance
+    if (res.statusCode >= 200 && res.statusCode < 300 && body?.prompt) {
+      const promptId = body.prompt._id || body.prompt.id;
+      const actor: IActorMetadata = {
+        userId: req.user?.id,
+        walletAddress: req.sessionWallet || req.user?.walletAddress,
+        ipAddress: req.ip,
+        userAgent: req.get("user-agent"),
+        timestamp: new Date(),
+      };
+
+      // Track in background (don't block response)
+      if (req.previousPromptVersion) {
+        trackPromptUpdateMiddleware(
+          promptId,
+          req.previousPromptVersion,
+          body.prompt,
+          actor,
+        ).catch((err) =>
+          logger.error("Background provenance tracking failed", {
+            action: "provenanceUpdateMiddleware",
+            error: err.message,
+          }),
+        );
+      }
+    }
+
+    return originalJson(body);
+  };
+
+  next();
+}
+
+/**
+ * Pre-update hook to capture the previous version.
+ * Use this before modifying a prompt to store the original state.
+ */
+export async function capturePromptVersion(req: any, promptId: string): Promise<void> {
+  try {
+    const prompt = await Prompt.findById(promptId).lean();
+    if (prompt) {
+      req.previousPromptVersion = prompt;
+    }
+  } catch (error: any) {
+    logger.error("Failed to capture prompt version", {
+      action: "capturePromptVersion",
+      error: error.message,
+      promptId,
+    });
   }
 }
