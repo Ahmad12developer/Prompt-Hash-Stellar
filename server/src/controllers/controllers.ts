@@ -513,7 +513,7 @@ export const GetPromptReports = async (
     if (req.query.includeArchived === "true") {
       delete query.archivedAt;
     }
-    const reports = await Report.find(query).sort({ createdAt: -1 });
+    const reports = await Report.find(query).sort({ createdAt: -1, _id: -1 });
 
     return res.json(reports);
   } catch (err) {
@@ -617,7 +617,7 @@ export const GetSavedPrompts = async (
 
     const prompts = await Prompt.find({ savedPrompts: user._id })
       .populate("owner", "username walletAddress")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1, _id: -1 });
 
     return res.json(prompts);
   } catch (err) {
@@ -733,7 +733,7 @@ export const GetDraftPrompts = async (
       listingStatus: "draft",
     })
       .populate("owner", "username walletAddress")
-      .sort({ updatedAt: -1 });
+      .sort({ updatedAt: -1, _id: -1 });
 
     return res.json(drafts);
   } catch (err) {
