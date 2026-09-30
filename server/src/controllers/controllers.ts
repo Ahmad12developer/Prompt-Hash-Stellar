@@ -19,6 +19,7 @@ import {
   invalidatePromptCaches,
   DEFAULT_TTL_SECONDS,
 } from "../services/cacheService.js";
+import MaintenanceBanner from "../models/MaintenanceBanner.js";
 import { sendConditionalJson, markPrivate } from "../middleware/etag.js";
 import { notifyPromptReported } from "../services/emailNotifications.js";
 import { announceNewPrompt } from "../services/discordNotifications.js";
@@ -875,6 +876,214 @@ export const CheckSimilarity = async (
     logger.error("Check similarity error", { action: "checkSimilarity", error });
     return res.status(500).json({
       error: (error as Error).message || "Failed to check similarity",
+    });
+  }
+};
+
+// ─── Maintenance Mode Banners ────────────────────────────────────────────────
+
+const MAINTENANCE_SCOPES = [
+  "marketplace",
+  "publishing",
+  "buyer-dashboard",
+  "creator-dashboard",
+  "wallet",
+  "chat",
+  "all",
+] as const;
+
+type MaintenanceScope = (typeof MAINTENANCE_SCOPES)[number];
+
+const isMaintenanceScope = (value: unknown): value is MaintenanceScope =>
+  typeof value === "string" &&
+  (MAINTENANCE_SCOPES as readonly string[]).includes(value);
+
+/**
+ * Return active maintenance banners, optionally filtered by scope.
+ * A banner is "active" when startsAt <= now < expiresAt (expiresAt optional).
+ * Expired and future banners are never returned.
+ */
+export const GetMaintenanceBanners = async (
+  req: Request,
+  res: Response,
+): Promise<Response<any>> => {
+  try {
+    await connectDb();
+
+    const scopeParam = req.query.scope;
+    const scopes: MaintenanceScope[] = [];
+
+    if (typeof scopeParam === "string" && scopeParam.length > 0) {
+      const requested = scopeParam.split(",").map((s) => s.trim());
+      for (const s of requested) {
+        if (!isMaintenanceScope(s)) {
+          return res
+            .status(400)
+            .json({ error: `Invalid scope: ${s}` });
+        }
+        scopes.push(s);
+      }
+    }
+
+    const now = new Date();
+    const query: any = {
+      enabled: true,
+      startsAt: { $lte: now },
+      $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }],
+    };
+
+    if (scopes.length > 0) {
+      query.scope = { $in: scopes };
+    }
+
+    const banners = await MaintenanceBanner.find(query)
+      .sort({ startsAt: -1 })
+      .lean();
+
+    return res.json({ data: banners });
+  } catch (err) {
+    logger.error("Get maintenance banners error", {
+      action: "getMaintenanceBanners",
+      error: err,
+    });
+    return res.status(500).json({
+      error: (err as Error).message || "Failed to fetch maintenance banners",
+    });
+  }
+};
+
+/**
+ * Create or update a maintenance banner. Requires admin scope
+ * (`maintenance:write`) enforced by route middleware.
+ */
+export const UpsertMaintenanceBanner = async (
+  req: Request,
+  res: Response,
+): Promise<Response<any>> => {
+  try {
+    await connectDb();
+
+    const {
+      id,
+      scope,
+      message,
+      startsAt,
+      expiresAt,
+      enabled,
+      affectedFeatures,
+      recoveryExpectation,
+    } = req.body || {};
+
+    if (!isMaintenanceScope(scope)) {
+      return res.status(400).json({ error: "Invalid or missing scope." });
+    }
+
+    if (typeof message !== "string" || message.trim().length === 0) {
+      return res.status(400).json({ error: "message is required." });
+    }
+
+    const parsedStartsAt = startsAt ? new Date(startsAt) : new Date();
+    if (Number.isNaN(parsedStartsAt.getTime())) {
+      return res.status(400).json({ error: "Invalid startsAt." });
+    }
+
+    let parsedExpiresAt: Date | null = null;
+    if (expiresAt) {
+      parsedExpiresAt = new Date(expiresAt);
+      if (Number.isNaN(parsedExpiresAt.getTime())) {
+        return res.status(400).json({ error: "Invalid expiresAt." });
+      }
+      if (parsedExpiresAt <= parsedStartsAt) {
+        return res
+          .status(400)
+          .json({ error: "expiresAt must be after startsAt." });
+      }
+    }
+
+    const actor =
+      (req as any).adminWallet ||
+      (req as any).user?.walletAddress ||
+      "unknown";
+
+    const payload = {
+      scope,
+      message: message.trim(),
+      startsAt: parsedStartsAt,
+      expiresAt: parsedExpiresAt,
+      enabled: enabled !== false,
+      affectedFeatures: Array.isArray(affectedFeatures)
+        ? affectedFeatures.filter((f: unknown) => typeof f === "string")
+        : [],
+      recoveryExpectation:
+        typeof recoveryExpectation === "string" ? recoveryExpectation : "",
+      updatedBy: actor,
+    };
+
+    let banner;
+    if (id) {
+      banner = await MaintenanceBanner.findByIdAndUpdate(id, payload, {
+        new: true,
+      });
+      if (!banner) {
+        return res.status(404).json({ error: "Banner not found." });
+      }
+    } else {
+      banner = await MaintenanceBanner.create({
+        ...payload,
+        createdBy: actor,
+      });
+    }
+
+    return res.status(id ? 200 : 201).json({ data: banner });
+  } catch (err) {
+    logger.error("Upsert maintenance banner error", {
+      action: "upsertMaintenanceBanner",
+      error: err,
+    });
+    return res.status(500).json({
+      error: (err as Error).message || "Failed to save maintenance banner",
+    });
+  }
+};
+
+/**
+ * Disable a maintenance banner (soft-disable, keeps audit trail).
+ */
+export const DisableMaintenanceBanner = async (
+  req: Request,
+  res: Response,
+): Promise<Response<any>> => {
+  try {
+    await connectDb();
+
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: "id is required." });
+    }
+
+    const actor =
+      (req as any).adminWallet ||
+      (req as any).user?.walletAddress ||
+      "unknown";
+
+    const banner = await MaintenanceBanner.findByIdAndUpdate(
+      id,
+      { enabled: false, updatedBy: actor },
+      { new: true },
+    );
+
+    if (!banner) {
+      return res.status(404).json({ error: "Banner not found." });
+    }
+
+    return res.json({ data: banner });
+  } catch (err) {
+    logger.error("Disable maintenance banner error", {
+      action: "disableMaintenanceBanner",
+      error: err,
+    });
+    return res.status(500).json({
+      error: (err as Error).message || "Failed to disable maintenance banner",
     });
   }
 };
