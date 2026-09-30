@@ -63,12 +63,37 @@ provenanceRouter.post(
   async (req: WalletSessionRequest, res: Response) => {
     try {
       await connectDb();
+      
+      // Declare the relation using the existing service
       const relation = await declareRelation({
         promptId: String(req.params.promptId),
         relatedPromptId: req.body?.relatedPromptId,
         kind: req.body?.kind,
         wallet: req.sessionWallet!,
       });
+
+      // Track provenance for derived prompts (fork, remix, parent)
+      if (["fork", "remix", "parent"].includes(req.body?.kind)) {
+        try {
+          await provenanceService.trackDerivedPrompt({
+            promptId: String(req.params.promptId),
+            onChainId: String(req.params.promptId),
+            parentPromptId: req.body?.relatedPromptId,
+            parentOnChainId: req.body?.relatedPromptId,
+            relationKind: req.body?.kind,
+            actor: {
+              walletAddress: req.sessionWallet,
+              timestamp: new Date(),
+            },
+            transformationType: req.body?.transformationType,
+            transformDetails: req.body?.transformDetails,
+          });
+        } catch (provErr) {
+          // Log but don't fail the relation creation if provenance tracking fails
+          console.error("Failed to track provenance for derived prompt:", provErr);
+        }
+      }
+
       res.status(201).json(relation);
     } catch (err) {
       handleProvenanceError(res, err);
@@ -201,6 +226,62 @@ provenanceRouter.get(
       res.json(stats);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch statistics" });
+    }
+  },
+);
+
+
+// ── Enhanced Derivatives Endpoint (combines #753 and #929) ──────────────────
+// GET /api/provenance/derivatives-enhanced/:promptId — get derivatives with full provenance
+provenanceRouter.get(
+  "/derivatives-enhanced/:promptId",
+  async (req: Request, res: Response) => {
+    try {
+      await connectDb();
+      const derivatives = await provenanceService.getDerivativesWithProvenance(req.params.promptId);
+      res.json({ 
+        promptId: req.params.promptId, 
+        count: derivatives.length, 
+        derivatives 
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || "Failed to fetch derivatives" });
+    }
+  },
+);
+
+// POST /api/provenance/track-derived — manually track a derived prompt
+provenanceRouter.post(
+  "/track-derived",
+  requireWalletSession((req: Request) => req.body?.actor?.walletAddress),
+  async (req: WalletSessionRequest, res: Response) => {
+    try {
+      await connectDb();
+      const result = await provenanceService.trackDerivedPrompt({
+        ...req.body,
+        actor: {
+          ...req.body.actor,
+          walletAddress: req.sessionWallet,
+        },
+      });
+      res.status(201).json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || "Failed to track derived prompt" });
+    }
+  },
+);
+
+// POST /api/provenance/track-derived-batch — batch track derived prompts
+provenanceRouter.post(
+  "/track-derived-batch",
+  requireAdminScope("provenance:write"),
+  async (req: Request, res: Response) => {
+    try {
+      await connectDb();
+      const result = await provenanceService.trackDerivedPrompts(req.body.derivations);
+      res.json(result);
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || "Failed to batch track derived prompts" });
     }
   },
 );

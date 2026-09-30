@@ -7,6 +7,7 @@ import ProvenanceRecord, {
   IActorMetadata,
 } from "../models/ProvenanceRecord";
 import Prompt from "../models/Prompt";
+import PromptRelation from "../models/PromptRelation";
 import { logger } from "./structuredLogger";
 import { recordAuditEvent } from "./auditTrail";
 
@@ -483,3 +484,236 @@ class ProvenanceService {
 }
 
 export const provenanceService = new ProvenanceService();
+
+
+/**
+ * Create provenance record for a derived prompt (fork, remix, parent, source).
+ * Integrates with the existing PromptRelation system from issue #753.
+ */
+export async function trackDerivedPrompt(params: {
+  promptId: string;
+  onChainId?: string;
+  parentPromptId: string;
+  parentOnChainId?: string;
+  relationKind: "fork" | "remix" | "parent" | "source";
+  actor: IActorMetadata;
+  transformationType?: TransformType;
+  transformDetails?: string;
+}): Promise<{ provenanceRecord: any; promptRelation: any }> {
+  const {
+    promptId,
+    onChainId,
+    parentPromptId,
+    parentOnChainId,
+    relationKind,
+    actor,
+    transformationType,
+    transformDetails,
+  } = params;
+
+  try {
+    // 1. Get parent provenance record if it exists
+    const parentProvenance = await ProvenanceRecord.findOne({
+      $or: [{ promptId: parentPromptId }, { onChainId: parentOnChainId }],
+    });
+
+    // 2. Determine transform type based on relation kind
+    let transformType: TransformType;
+    switch (relationKind) {
+      case "fork":
+        transformType = transformationType || "FORK";
+        break;
+      case "remix":
+        transformType = transformationType || "REMIX";
+        break;
+      case "parent":
+        transformType = "VERSION_UPDATE";
+        break;
+      case "source":
+        transformType = "CONTENT_ENHANCEMENT";
+        break;
+    }
+
+    // 3. Create provenance record for the derived prompt
+    const transformations: Partial<ITransformMetadata>[] = [
+      {
+        transformType,
+        timestamp: new Date(),
+        actor,
+        details: transformDetails || `Derived from prompt ${parentOnChainId || parentPromptId} via ${relationKind}`,
+      },
+    ];
+
+    // If parent has provenance, inherit some metadata
+    const sourceSystem: ISourceSystem = parentProvenance
+      ? {
+          name: parentProvenance.sourceSystem.name,
+          version: parentProvenance.sourceSystem.version,
+          identifier: `derived_from_${parentOnChainId || parentPromptId}`,
+        }
+      : {
+          name: "PromptHash Platform",
+          version: "1.0",
+          identifier: `derived_from_${parentOnChainId || parentPromptId}`,
+        };
+
+    const provenanceRecord = await createProvenanceRecord({
+      promptId,
+      onChainId,
+      sourceType: "BLOCKCHAIN", // Derived prompts typically come from on-chain parents
+      sourceSystem,
+      transformations,
+      actor,
+      parentRecordId: parentProvenance ? String(parentProvenance._id) : undefined,
+    });
+
+    // 4. Update the prompt with provenance reference
+    await Prompt.findByIdAndUpdate(promptId, {
+      $set: {
+        provenanceRecordId: provenanceRecord._id,
+        provenanceSource: "BLOCKCHAIN",
+        provenanceActorId: actor.userId || actor.walletAddress,
+        hasProvenance: true,
+      },
+    });
+
+    // 5. Create PromptRelation record if it doesn't exist (to maintain compatibility with #753)
+    const promptRelation = await PromptRelation.findOneAndUpdate(
+      {
+        promptId: onChainId || promptId,
+        relatedPromptId: parentOnChainId || parentPromptId,
+      },
+      {
+        $set: {
+          kind: relationKind,
+          origin: "creator",
+          declaredBy: actor.walletAddress?.toLowerCase(),
+        },
+      },
+      { upsert: true, new: true },
+    );
+
+    // 6. Record audit event
+    await recordAuditEvent({
+      actor: actor.walletAddress || actor.userId || "system",
+      action: "prompt.derived",
+      resource: `prompt:${promptId}`,
+      metadata: {
+        parentPromptId,
+        relationKind,
+        transformType,
+        provenanceRecordId: String(provenanceRecord._id),
+      },
+    });
+
+    logger.info("Tracked derived prompt", {
+      action: "trackDerivedPrompt",
+      promptId,
+      parentPromptId,
+      relationKind,
+      transformType,
+    });
+
+    return { provenanceRecord, promptRelation };
+  } catch (error: any) {
+    logger.error("Failed to track derived prompt", {
+      action: "trackDerivedPrompt",
+      error: error.message,
+      promptId,
+      parentPromptId,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Batch track multiple derived prompts (useful for bulk fork/remix operations).
+ */
+export async function trackDerivedPrompts(
+  derivations: Array<{
+    promptId: string;
+    onChainId?: string;
+    parentPromptId: string;
+    parentOnChainId?: string;
+    relationKind: "fork" | "remix" | "parent" | "source";
+    actor: IActorMetadata;
+    transformationType?: TransformType;
+    transformDetails?: string;
+  }>,
+): Promise<{ successes: number; failures: number; results: any[] }> {
+  const results = [];
+  let successes = 0;
+  let failures = 0;
+
+  for (const derivation of derivations) {
+    try {
+      const result = await trackDerivedPrompt(derivation);
+      results.push({ success: true, ...result });
+      successes++;
+    } catch (error: any) {
+      results.push({
+        success: false,
+        promptId: derivation.promptId,
+        error: error.message,
+      });
+      failures++;
+    }
+  }
+
+  logger.info("Batch tracked derived prompts", {
+    action: "trackDerivedPrompts",
+    total: derivations.length,
+    successes,
+    failures,
+  });
+
+  return { successes, failures, results };
+}
+
+/**
+ * Get all forks and remixes of a prompt (combines ProvenanceRecord and PromptRelation data).
+ */
+export async function getDerivativesWithProvenance(promptId: string): Promise<any[]> {
+  const [provenanceDerivatives, relationDerivatives] = await Promise.all([
+    ProvenanceRecord.find({ parentRecordId: promptId }).lean(),
+    PromptRelation.find({
+      relatedPromptId: promptId,
+      kind: { $in: ["fork", "remix", "parent"] },
+    }).lean(),
+  ]);
+
+  // Combine both sources and deduplicate
+  const derivativeMap = new Map();
+
+  for (const prov of provenanceDerivatives) {
+    derivativeMap.set(prov.promptId, {
+      promptId: prov.promptId,
+      onChainId: prov.onChainId,
+      source: "provenance",
+      transformations: prov.transformations,
+      actor: prov.actor,
+      createdAt: prov.createdAt,
+    });
+  }
+
+  for (const rel of relationDerivatives) {
+    const existing = derivativeMap.get(rel.promptId);
+    if (existing) {
+      existing.relationKind = rel.kind;
+      existing.relationOrigin = rel.origin;
+    } else {
+      derivativeMap.set(rel.promptId, {
+        promptId: rel.promptId,
+        source: "relation",
+        relationKind: rel.kind,
+        relationOrigin: rel.origin,
+        declaredBy: rel.declaredBy,
+        createdAt: rel.createdAt,
+      });
+    }
+  }
+
+  return Array.from(derivativeMap.values()).sort(
+    (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+  );
+}
