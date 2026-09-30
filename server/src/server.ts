@@ -22,10 +22,11 @@ import { qualityCheckRouter } from "./routes/qualityCheckRoutes.js";
 import { recommendationFeedbackRouter } from "./routes/recommendationFeedbackRoutes.js";
 import { operationalHealthRouter } from "./routes/operationalHealthRoutes.js";
 import { drRouter } from "./routes/drRoutes.js";
-import { exportRouter } from "./routes/exportRoutes.js";
+import { exportRouter } from "./routes/exportRoutes";
 import { policyLimitRouter } from "./routes/policyLimitRoutes";
 import { operationRecoveryRouter } from "./routes/operationRecoveryRoutes";
 import { receiptRouter } from "./routes/receiptRoutes";
+import { maintenanceBannerRouter } from "./routes/maintenanceBannerRoutes";
 import {
   GetOpenApiSchema,
   GetOpenApiExplorer,
@@ -73,6 +74,7 @@ app.use("/api/support-cases", supportCaseRouter);
 app.use("/api/quality-checks", qualityCheckRouter);
 app.use("/api/recommendations/feedback", recommendationFeedbackRouter);
 app.use("/api/admin/operational-health", operationalHealthRouter);
+app.use("/api/maintenance", maintenanceBannerRouter); // Maintenance mode banners
 // Export routes for user-owned data (requires authentication)
 // Machine-readable API schema + interactive explorer (#713).
 app.use("/api/exports", exportRouter)
@@ -150,5 +152,6 @@ app.listen(port, () => {
   startIndexer().catch((err) => {
     console.error("Failed to start Soroban Indexer:", err);
   });
+});
 
 export default app;

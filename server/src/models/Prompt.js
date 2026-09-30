@@ -266,6 +266,36 @@ const promptSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    // Provenance tracking fields (Issue #929)
+    // Quick-access denormalized provenance metadata for efficient queries
+    // Full provenance history is stored in ProvenanceRecord collection
+    provenanceSource: {
+      type: String,
+      enum: ["manual", "api", "file_upload", "migration", "external_api", "fork", "template", "ai_generated", "system"],
+      default: "manual",
+      index: true,
+    },
+    provenanceBatchId: {
+      type: String,
+      index: true,
+      default: null,
+    },
+    provenanceActorId: {
+      type: String,
+      index: true,
+      default: null,
+    },
+    provenanceRecordId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ProvenanceRecord",
+      index: true,
+      default: null,
+    },
+    hasProvenance: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
   },
   {
     timestamps: true,
