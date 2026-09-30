@@ -21,8 +21,6 @@ import {
   Globe,
   GitFork,
   GitMerge,
-  Link2,
-  Loader2,
   Package,
   Shuffle,
   Upload,
@@ -38,26 +36,26 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type ImportSourceType =
-  | "API_IMPORT"
-  | "MANUAL_ENTRY"
-  | "FILE_UPLOAD"
-  | "EXTERNAL_SYSTEM"
-  | "BULK_IMPORT"
-  | "BLOCKCHAIN"
-  | "AI_GENERATION"
-  | "MIGRATION"
-  | "SCRAPING";
+  | "manual"
+  | "api"
+  | "file_upload"
+  | "migration"
+  | "external_api"
+  | "fork"
+  | "template"
+  | "ai_generated"
+  | "system";
 
 type TransformType =
-  | "TRANSLATION"
-  | "FORMAT_CONVERSION"
-  | "ENRICHMENT"
-  | "VALIDATION"
-  | "NORMALIZATION"
-  | "AGGREGATION"
-  | "FORK"
-  | "REMIX"
-  | "VERSION_UPDATE";
+  | "none"
+  | "translation"
+  | "summarization"
+  | "expansion"
+  | "format_conversion"
+  | "ai_enhancement"
+  | "merge"
+  | "extraction"
+  | "customization";
 
 interface ProvenanceRecord {
   _id: string;
@@ -79,19 +77,26 @@ interface ProvenanceRecord {
     transformType: TransformType;
     timestamp: string;
     actor: {
-      userId?: string;
-      walletAddress?: string;
-      ipAddress?: string;
-      userAgent?: string;
+      actorType: "user" | "system" | "service" | "admin";
+      actorId: string;
+      actorName?: string;
+      actorWallet?: string;
+      actorEmail?: string;
+      actorRole?: string;
+      actorIp?: string;
+      actorUserAgent?: string;
     };
     details: string;
   }>;
   actor: {
-    userId?: string;
-    walletAddress?: string;
-    ipAddress?: string;
-    userAgent?: string;
-    timestamp: string;
+    actorType: "user" | "system" | "service" | "admin";
+    actorId: string;
+    actorName?: string;
+    actorWallet?: string;
+    actorEmail?: string;
+    actorRole?: string;
+    actorIp?: string;
+    actorUserAgent?: string;
   };
   parentRecordId?: string;
   childRecordIds: string[];
@@ -128,27 +133,27 @@ async function fetchDerivatives(promptId: string) {
 // ── Icon mapping ──────────────────────────────────────────────────────────────
 
 const SOURCE_TYPE_ICONS: Record<ImportSourceType, React.ComponentType<any>> = {
-  API_IMPORT: Globe,
-  MANUAL_ENTRY: User,
-  FILE_UPLOAD: FileUp,
-  EXTERNAL_SYSTEM: Database,
-  BULK_IMPORT: Package,
-  BLOCKCHAIN: Link2,
-  AI_GENERATION: Bot,
-  MIGRATION: Archive,
-  SCRAPING: Shuffle,
+  manual: User,
+  api: Globe,
+  file_upload: FileUp,
+  migration: Archive,
+  external_api: Database,
+  fork: GitFork,
+  template: Package,
+  ai_generated: Bot,
+  system: Shuffle,
 };
 
 const TRANSFORM_TYPE_ICONS: Record<TransformType, React.ComponentType<any>> = {
-  TRANSLATION: Globe,
-  FORMAT_CONVERSION: Shuffle,
-  ENRICHMENT: Upload,
-  VALIDATION: Check,
-  NORMALIZATION: Users,
-  AGGREGATION: Package,
-  FORK: GitFork,
-  REMIX: GitMerge,
-  VERSION_UPDATE: Clock,
+  none: Clock,
+  translation: Globe,
+  summarization: Users,
+  expansion: Upload,
+  format_conversion: Shuffle,
+  ai_enhancement: Bot,
+  merge: GitMerge,
+  extraction: Package,
+  customization: Check,
 };
 
 // ── Component ─────────────────────────────────────────────────────────────────

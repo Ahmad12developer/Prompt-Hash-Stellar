@@ -315,21 +315,21 @@ export async function trackPromptUpdateMiddleware(
     }
 
     // Determine the type of update based on changed fields
-    let updateType: TransformType = "NORMALIZATION";
+    let updateType: TransformType = "customization";
     let updateDetails = `Updated ${diff.changedFields.length} field(s): ${diff.changedFields.join(", ")}`;
 
     // Classify the update type based on changed fields
     if (diff.changedFields.some((f) => ["content", "encryptedPrompt", "preview"].includes(f))) {
-      updateType = "CONTENT_ENHANCEMENT";
+      updateType = "ai_enhancement";
       updateDetails = "Content updated";
     } else if (diff.changedFields.some((f) => ["title", "description", "category"].includes(f))) {
-      updateType = "ENRICHMENT";
+      updateType = "customization";
       updateDetails = "Metadata updated";
     } else if (diff.changedFields.includes("price")) {
-      updateType = "NORMALIZATION";
+      updateType = "customization";
       updateDetails = `Price updated from ${diff.modifications.price?.old} to ${diff.modifications.price?.new}`;
     } else if (diff.changedFields.includes("currentVersionIndex")) {
-      updateType = "VERSION_UPDATE";
+      updateType = "customization";
       updateDetails = `Version updated to ${currentVersion.currentVersionIndex}`;
     }
 
@@ -419,11 +419,13 @@ export function provenanceUpdateMiddleware(req: any, res: any, next: any) {
     if (res.statusCode >= 200 && res.statusCode < 300 && body?.prompt) {
       const promptId = body.prompt._id || body.prompt.id;
       const actor: IActorMetadata = {
-        userId: req.user?.id,
-        walletAddress: req.sessionWallet || req.user?.walletAddress,
-        ipAddress: req.ip,
-        userAgent: req.get("user-agent"),
-        timestamp: new Date(),
+        actorType: req.user?.role === "admin" ? "admin" : req.user ? "user" : "system",
+        actorId: req.sessionWallet || req.user?.id || "system",
+        actorName: req.user?.username || req.user?.displayName,
+        actorWallet: req.sessionWallet || req.user?.walletAddress,
+        actorRole: req.user?.role,
+        actorIp: req.ip,
+        actorUserAgent: req.get("user-agent"),
       };
 
       // Track in background (don't block response)

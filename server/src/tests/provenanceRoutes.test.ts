@@ -35,7 +35,7 @@ vi.mock("../db/connectDb", () => ({
 }));
 
 // Mock provenance service
-const mockProvenanceService = {
+const mockServiceInstance = {
   createProvenanceRecord: vi.fn(async (params: any) => ({
     _id: "prov_test",
     ...params,
@@ -44,7 +44,7 @@ const mockProvenanceService = {
   getProvenanceByPromptId: vi.fn(async (id: string) => ({
     _id: "prov_test",
     promptId: id,
-    sourceType: "API_IMPORT",
+    sourceType: "api",
   })),
   getBatchPrompts: vi.fn(async (batchId: string) => [
     { promptId: "1", batchId },
@@ -63,10 +63,13 @@ const mockProvenanceService = {
   ]),
   getImportStatistics: vi.fn(async () => ({
     totalRecords: 100,
-    bySourceType: { API_IMPORT: 50, BULK_IMPORT: 50 },
+    bySourceType: { api: 50, file_upload: 50 },
     recentImports: 10,
     totalBatches: 5,
   })),
+};
+
+const mockStandaloneFunctions = {
   trackDerivedPrompt: vi.fn(async (params: any) => ({
     provenanceRecord: { _id: "prov_derived", ...params },
     promptRelation: { promptId: params.promptId, relatedPromptId: params.parentPromptId },
@@ -84,13 +87,16 @@ const mockProvenanceService = {
     promptId,
     totalUpdates: 2,
     updates: [
-      { transformType: "VERSION_UPDATE", timestamp: new Date(), details: "Update 1" },
-      { transformType: "CONTENT_ENHANCEMENT", timestamp: new Date(), details: "Update 2" },
+      { transformType: "customization", timestamp: new Date(), details: "Update 1" },
+      { transformType: "ai_enhancement", timestamp: new Date(), details: "Update 2" },
     ],
   })),
 };
 
-vi.mock("../services/provenanceService", () => mockProvenanceService);
+vi.mock("../services/provenanceService", () => ({
+  provenanceService: mockServiceInstance,
+  ...mockStandaloneFunctions,
+}));
 
 // Helper to create mock request/response
 function createMockReqRes(options: {

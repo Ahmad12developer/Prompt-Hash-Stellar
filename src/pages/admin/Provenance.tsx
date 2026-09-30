@@ -53,15 +53,15 @@ import {
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type ImportSourceType =
-  | "API_IMPORT"
-  | "MANUAL_ENTRY"
-  | "FILE_UPLOAD"
-  | "EXTERNAL_SYSTEM"
-  | "BULK_IMPORT"
-  | "BLOCKCHAIN"
-  | "AI_GENERATION"
-  | "MIGRATION"
-  | "SCRAPING";
+  | "manual"
+  | "api"
+  | "file_upload"
+  | "migration"
+  | "external_api"
+  | "fork"
+  | "template"
+  | "ai_generated"
+  | "system";
 
 interface ImportBatch {
   _id: string;
@@ -138,15 +138,15 @@ async function fetchProvenanceQuery(filters: {
 // ── Icon mapping ──────────────────────────────────────────────────────────────
 
 const SOURCE_TYPE_ICONS: Record<ImportSourceType, React.ComponentType<any>> = {
-  API_IMPORT: Globe,
-  MANUAL_ENTRY: User,
-  FILE_UPLOAD: FileUp,
-  EXTERNAL_SYSTEM: Database,
-  BULK_IMPORT: Package,
-  BLOCKCHAIN: Link2,
-  AI_GENERATION: Bot,
-  MIGRATION: Archive,
-  SCRAPING: Shuffle,
+  manual: User,
+  api: Globe,
+  file_upload: FileUp,
+  migration: Archive,
+  external_api: Database,
+  fork: Shuffle,
+  template: Package,
+  ai_generated: Bot,
+  system: Link2,
 };
 
 // ── Component ─────────────────────────────────────────────────────────────────

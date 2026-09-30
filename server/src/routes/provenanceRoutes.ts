@@ -153,7 +153,7 @@ provenanceRouter.get(
   async (req: Request, res: Response) => {
     try {
       await connectDb();
-      const record = await provenanceService.getProvenanceByPromptId(req.params.promptId);
+      const record = await provenanceService.provenanceService.getProvenanceByPromptId(req.params.promptId);
       if (!record) {
         return res.status(404).json({ error: "Provenance record not found" });
       }
@@ -169,7 +169,7 @@ provenanceRouter.get(
   async (req: Request, res: Response) => {
     try {
       await connectDb();
-      const prompts = await provenanceService.getBatchPrompts(req.params.batchId);
+      const prompts = await provenanceService.provenanceService.getBatchPrompts(req.params.batchId);
       res.json({ batchId: req.params.batchId, count: prompts.length, prompts });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch batch prompts" });
@@ -182,7 +182,7 @@ provenanceRouter.get(
   async (req: Request, res: Response) => {
     try {
       await connectDb();
-      const lineage = await provenanceService.getLineage(req.params.promptId);
+      const lineage = await provenanceService.provenanceService.getLineage(req.params.promptId);
       res.json(lineage);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch lineage" });
@@ -195,7 +195,7 @@ provenanceRouter.get(
   async (req: Request, res: Response) => {
     try {
       await connectDb();
-      const derivatives = await provenanceService.getDerivatives(req.params.promptId);
+      const derivatives = await provenanceService.provenanceService.getDerivatives(req.params.promptId);
       res.json({ promptId: req.params.promptId, count: derivatives.length, derivatives });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch derivatives" });
@@ -208,7 +208,7 @@ provenanceRouter.post(
   async (req: Request, res: Response) => {
     try {
       await connectDb();
-      const results = await provenanceService.queryProvenance(req.body);
+      const results = await provenanceService.provenanceService.queryProvenance(req.body);
       res.json(results);
     } catch (err: any) {
       res.status(400).json({ error: err.message || "Invalid query parameters" });
@@ -222,7 +222,7 @@ provenanceRouter.get(
   async (req: Request, res: Response) => {
     try {
       await connectDb();
-      const stats = await provenanceService.getImportStatistics();
+      const stats = await provenanceService.provenanceService.getImportStatistics({});
       res.json(stats);
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Failed to fetch statistics" });

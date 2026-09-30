@@ -116,34 +116,34 @@ describe("Provenance Service - Import Tracking", () => {
 
   it("creates a provenance record for API import", async () => {
     const actor: IActorMetadata = {
-      userId: "user_123",
-      walletAddress: "GTEST123",
-      timestamp: new Date(),
+      actorType: "user",
+      actorId: "user_123",
+      actorWallet: "GTEST123",
     };
 
     const record = store.createRecord({
       promptId: "prompt_1",
       onChainId: "1",
-      sourceType: "API_IMPORT" as ImportSourceType,
+      sourceType: "api" as ImportSourceType,
       actor,
     });
 
     expect(record.promptId).toBe("prompt_1");
-    expect(record.sourceType).toBe("API_IMPORT");
-    expect(record.actor.userId).toBe("user_123");
+    expect(record.sourceType).toBe("api");
+    expect(record.actor.actorId).toBe("user_123");
   });
 
   it("creates a provenance record with import batch", async () => {
     const record = store.createRecord({
       promptId: "prompt_2",
-      sourceType: "BULK_IMPORT" as ImportSourceType,
+      sourceType: "file_upload" as ImportSourceType,
       importBatch: {
         batchId: "batch_001",
         totalItems: 100,
         importedAt: new Date(),
         importedBy: "admin",
       },
-      actor: { timestamp: new Date() },
+      actor: { actorType: "admin" as const, actorId: "admin_1" },
     });
 
     expect(record.importBatch.batchId).toBe("batch_001");
